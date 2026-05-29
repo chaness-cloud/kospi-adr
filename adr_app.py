@@ -50,7 +50,20 @@ def get_tickers(market: str) -> list[str]:
         if saved.get("date") == today:
             return saved["tickers"]
 
-    # KRX-DESC 기반 (Python 3.14 호환, Streamlit Cloud 안정)
+    # ① 번들된 CSV 파일 (가장 안정적 — KRX 접근 불필요)
+    csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            f"{market.lower()}_tickers.csv")
+    if os.path.exists(csv_path):
+        try:
+            tickers = pd.read_csv(csv_path)["Code"].astype(str).str.zfill(6).tolist()
+            if tickers:
+                with open(cache_file, "wb") as f:
+                    pickle.dump({"date": today, "tickers": tickers}, f)
+                return tickers
+        except Exception:
+            pass
+
+    # ② KRX-DESC (로컬 환경용 fallback)
     try:
         desc = fdr.StockListing('KRX-DESC')
         listing = desc[desc['Market'] == market]
@@ -62,7 +75,7 @@ def get_tickers(market: str) -> list[str]:
     except Exception:
         pass
 
-    # fallback: fdr.StockListing(market)
+    # ③ fdr.StockListing(market) 최후 fallback
     try:
         listing = fdr.StockListing(market)
         tickers = listing["Code"].tolist()
@@ -105,9 +118,9 @@ def _ensure_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(show_spinner=False)
-def load_close_prices(market: str, force_refresh: bool = False) -> pd.DataFrame:
-    """날짜 키를 써서 당일 캐시를 재사용, 다음날 자동 갱신."""
+def _load_close_prices_inner(market: str, force_refresh: bool = False,
+                              progress_bar=None) -> pd.DataFrame:
+    """실제 데이터 로드 로직 — st.* 호출 없음 (캐시 함수 안에서 호출 불가)."""
     cache_file = os.path.join(CACHE_DIR, f"close_{market}.pkl")
     start = _start_date()
     end = _today()
@@ -128,11 +141,7 @@ def load_close_prices(market: str, force_refresh: bool = False) -> pd.DataFrame:
             return existing.loc[mask]
 
         fetch_start = (existing.index.max() + timedelta(days=1)).strftime("%Y-%m-%d")
-        msg = st.empty()
-        msg.info(f"[{market}] {fetch_start} 이후 신규 데이터 다운로드 중...")
-        pb = st.progress(0)
-        new_df = _download_closes(market, fetch_start, end, pb)
-        pb.empty(); msg.empty()
+        new_df = _download_closes(market, fetch_start, end, progress_bar)
         new_df = _ensure_datetime_index(new_df)
         if not new_df.empty:
             combined = pd.concat([existing, new_df])
@@ -140,11 +149,7 @@ def load_close_prices(market: str, force_refresh: bool = False) -> pd.DataFrame:
         else:
             combined = existing
     else:
-        msg = st.empty()
-        msg.info(f"[{market}] 5년치 데이터 최초 다운로드 중 — 수 분 소요됩니다...")
-        pb = st.progress(0)
-        combined = _download_closes(market, start, end, pb)
-        pb.empty(); msg.empty()
+        combined = _download_closes(market, start, end, progress_bar)
         combined = _ensure_datetime_index(combined)
 
     if not combined.empty:
@@ -158,6 +163,12 @@ def load_close_prices(market: str, force_refresh: bool = False) -> pd.DataFrame:
         return combined
     mask = combined.index >= pd.to_datetime(start)
     return combined.loc[mask]
+
+
+def load_close_prices(market: str, force_refresh: bool = False,
+                      progress_bar=None) -> pd.DataFrame:
+    """날짜 키를 써서 당일 캐시를 재사용, 다음날 자동 갱신."""
+    return _load_close_prices_inner(market, force_refresh, progress_bar)
 
 
 @st.cache_data(show_spinner=False)
@@ -901,14 +912,18 @@ def build_recovery_chart(rec: dict, adr: pd.Series, period: int) -> go.Figure:
 # ── 종목 스크리너 ─────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def get_stock_names(market: str) -> dict[str, str]:
+    csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            f"{market.lower()}_tickers.csv")
+    if os.path.exists(csv_path):
+        try:
+            df = pd.read_csv(csv_path)
+            df["Code"] = df["Code"].astype(str).str.zfill(6)
+            return df.set_index("Code")["Name"].to_dict()
+        except Exception:
+            pass
     try:
         desc = fdr.StockListing('KRX-DESC')
         listing = desc[desc['Market'] == market]
-        return listing.set_index("Code")["Name"].to_dict()
-    except Exception:
-        pass
-    try:
-        listing = fdr.StockListing(market)
         return listing.set_index("Code")["Name"].to_dict()
     except Exception:
         return {}
@@ -1207,9 +1222,12 @@ tabs = st.tabs(markets)
 
 for tab, market in zip(tabs, markets):
     with tab:
-        with st.spinner(f"{market} 데이터 로드 중..."):
-            close = load_close_prices(market)
-            index_s = load_index(market) if show_index else None
+        _msg = st.empty()
+        _pb = st.progress(0)
+        _msg.info(f"[{market}] 데이터 로드 중...")
+        close = load_close_prices(market, progress_bar=_pb)
+        _pb.empty(); _msg.empty()
+        index_s = load_index(market) if show_index else None
 
         if close.empty:
             st.error(f"{market} 데이터를 불러오지 못했습니다.")
