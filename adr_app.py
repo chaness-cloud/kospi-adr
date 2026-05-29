@@ -88,9 +88,21 @@ def _download_closes(market: str, start: str, end: str, progress_bar=None) -> pd
             pass
     if not frames:
         return pd.DataFrame()
-    result = pd.DataFrame(frames).sort_index()
-    result.index = pd.to_datetime(result.index)
+    result = pd.DataFrame(frames)
+    result.index = pd.to_datetime(result.index, errors="coerce")
+    result = result[result.index.notna()].sort_index()
     return result
+
+
+def _ensure_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
+    """인덱스가 DatetimeIndex가 아니면 강제 변환."""
+    if df.empty:
+        return df
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df = df.copy()
+        df.index = pd.to_datetime(df.index, errors="coerce")
+        df = df[df.index.notna()].sort_index()
+    return df
 
 
 @st.cache_data(show_spinner=False)
@@ -102,8 +114,12 @@ def load_close_prices(market: str, force_refresh: bool = False) -> pd.DataFrame:
 
     existing = None
     if os.path.exists(cache_file) and not force_refresh:
-        with open(cache_file, "rb") as f:
-            existing = pickle.load(f)
+        try:
+            with open(cache_file, "rb") as f:
+                existing = pickle.load(f)
+            existing = _ensure_datetime_index(existing)
+        except Exception:
+            existing = None
 
     if existing is not None and not existing.empty:
         cached_end = existing.index.max().strftime("%Y-%m-%d")
@@ -117,6 +133,7 @@ def load_close_prices(market: str, force_refresh: bool = False) -> pd.DataFrame:
         pb = st.progress(0)
         new_df = _download_closes(market, fetch_start, end, pb)
         pb.empty(); msg.empty()
+        new_df = _ensure_datetime_index(new_df)
         if not new_df.empty:
             combined = pd.concat([existing, new_df])
             combined = combined[~combined.index.duplicated(keep="last")].sort_index()
@@ -128,11 +145,17 @@ def load_close_prices(market: str, force_refresh: bool = False) -> pd.DataFrame:
         pb = st.progress(0)
         combined = _download_closes(market, start, end, pb)
         pb.empty(); msg.empty()
+        combined = _ensure_datetime_index(combined)
 
     if not combined.empty:
-        with open(cache_file, "wb") as f:
-            pickle.dump(combined, f)
+        try:
+            with open(cache_file, "wb") as f:
+                pickle.dump(combined, f)
+        except Exception:
+            pass
 
+    if combined.empty:
+        return combined
     mask = combined.index >= pd.to_datetime(start)
     return combined.loc[mask]
 
