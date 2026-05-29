@@ -49,11 +49,28 @@ def get_tickers(market: str) -> list[str]:
             saved = pickle.load(f)
         if saved.get("date") == today:
             return saved["tickers"]
-    listing = fdr.StockListing(market)
-    tickers = listing["Code"].tolist()
-    with open(cache_file, "wb") as f:
-        pickle.dump({"date": today, "tickers": tickers}, f)
-    return tickers
+
+    # KRX-DESC 기반 (Python 3.14 호환, Streamlit Cloud 안정)
+    try:
+        desc = fdr.StockListing('KRX-DESC')
+        listing = desc[desc['Market'] == market]
+        tickers = listing["Code"].tolist()
+        if tickers:
+            with open(cache_file, "wb") as f:
+                pickle.dump({"date": today, "tickers": tickers}, f)
+            return tickers
+    except Exception:
+        pass
+
+    # fallback: fdr.StockListing(market)
+    try:
+        listing = fdr.StockListing(market)
+        tickers = listing["Code"].tolist()
+        with open(cache_file, "wb") as f:
+            pickle.dump({"date": today, "tickers": tickers}, f)
+        return tickers
+    except Exception:
+        return []
 
 
 def _download_closes(market: str, start: str, end: str, progress_bar=None) -> pd.DataFrame:
@@ -861,6 +878,12 @@ def build_recovery_chart(rec: dict, adr: pd.Series, period: int) -> go.Figure:
 # ── 종목 스크리너 ─────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def get_stock_names(market: str) -> dict[str, str]:
+    try:
+        desc = fdr.StockListing('KRX-DESC')
+        listing = desc[desc['Market'] == market]
+        return listing.set_index("Code")["Name"].to_dict()
+    except Exception:
+        pass
     try:
         listing = fdr.StockListing(market)
         return listing.set_index("Code")["Name"].to_dict()
