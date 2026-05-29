@@ -1351,7 +1351,7 @@ for tab, market in zip(tabs, markets):
                         return ""
 
                     st.dataframe(
-                        df_s.style.applymap(color_ret, subset=["평균수익률", "중앙값", "최대", "최소"]),
+                        df_s.style.map(color_ret, subset=["평균수익률", "중앙값", "최대", "최소"]),
                         use_container_width=True, hide_index=True,
                     )
                     rc1, rc2 = st.columns([1, 1.2])
