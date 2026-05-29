@@ -165,10 +165,18 @@ def _load_close_prices_inner(market: str, force_refresh: bool = False,
     return combined.loc[mask]
 
 
+@st.cache_data(show_spinner=False, ttl=3600)
+def _load_close_prices_cached(market: str, today_key: str) -> pd.DataFrame:
+    """오늘 날짜를 키로 써서 당일 RAM 캐시 유지. st.* 호출 없음."""
+    return _load_close_prices_inner(market)
+
+
 def load_close_prices(market: str, force_refresh: bool = False,
                       progress_bar=None) -> pd.DataFrame:
-    """날짜 키를 써서 당일 캐시를 재사용, 다음날 자동 갱신."""
-    return _load_close_prices_inner(market, force_refresh, progress_bar)
+    """RAM 캐시(당일) → pickle(디스크) → 다운로드 순으로 데이터 반환."""
+    if force_refresh:
+        st.cache_data.clear()
+    return _load_close_prices_cached(market, _today())
 
 
 @st.cache_data(show_spinner=False)
