@@ -2361,6 +2361,7 @@ for tab, market in zip(tabs, markets):
                         )
 
                         etf_col_cfg = {
+                            "차트": st.column_config.LinkColumn("차트", display_text="📈"),
                             "신호강도": st.column_config.ProgressColumn(
                                 "신호강도", min_value=-50, max_value=100, format="%.1f",
                                 help="거래대금모멘텀×0.5 + 연속증가일×5 + 5일수익률×0.3"),
@@ -2378,7 +2379,10 @@ for tab, market in zip(tabs, markets):
                                 "change_5d": "5일수익률(%)", "change_today": "당일수익률(%)",
                                 "etf_signal_score": "신호강도",
                             })
-                            cols = ["ETF명", "티커", "테마", "신호강도",
+                            df["차트"] = df["티커"].apply(
+                                lambda t: f"https://finance.naver.com/item/main.naver?code={t}"
+                            )
+                            cols = ["차트", "ETF명", "티커", "테마", "신호강도",
                                     "거래대금모멘텀(%)", "연속증가일", "5일수익률(%)", "당일수익률(%)"]
                             return df[[c for c in cols if c in df.columns]].reset_index(drop=True)
 
