@@ -729,6 +729,193 @@ def calc_divergence(adr: pd.Series, index_s: pd.Series, window: int = 20) -> pd.
     return df
 
 
+def classify_ab_type(adr: pd.Series, index_s: pd.Series, window: int = 60) -> str:
+    """
+    현재 쏠림 유형 판정.
+    A타입: 지수도 같이 하락 중 (전체 하락장 중 ADR 하락)
+    B타입: 지수는 상승인데 ADR만 하락 (쏠림장, 현재)
+    """
+    common = adr.dropna().index.intersection(index_s.dropna().index)
+    if len(common) < window:
+        return "알 수 없음"
+    idx_chg = index_s.loc[common].pct_change(window).iloc[-1]
+    adr_chg = adr.loc[common].pct_change(window).iloc[-1]
+    if idx_chg > 0.02 and adr_chg < -0.05:
+        return "B"   # 지수↑ ADR↓ = 쏠림형
+    elif idx_chg < -0.02 and adr_chg < -0.05:
+        return "A"   # 지수↓ ADR↓ = 전체하락형
+    else:
+        return "중립"
+
+
+def calc_concentration_probability(adr: pd.Series, index_s: pd.Series,
+                                    horizons: list = [5, 20, 60],
+                                    lookback: int = 252) -> dict:
+    """
+    현재 시장 상태와 유사한 과거 날짜를 찾아
+    각 기간(horizon) 후 쏠림이 심화됐을 확률 vs 전환됐을 확률을 계산.
+
+    유사 조건:
+      - ADR 백분위 비슷 (±15%p)
+      - 같은 A/B 타입
+      - ADR 모멘텀 방향 동일 (하락 중)
+    """
+    common = adr.dropna().index.intersection(index_s.dropna().index)
+    s = adr.loc[common]
+    idx = index_s.loc[common]
+
+    # 롤링 백분위 (252일 기준)
+    rolling_pct = s.rolling(lookback, min_periods=lookback//2).rank(pct=True) * 100
+    cur_pct = rolling_pct.iloc[-1]
+
+    # 현재 ADR 모멘텀 (20일 변화율)
+    adr_mom = s.pct_change(20)
+    idx_mom = idx.pct_change(20)
+
+    cur_adr_mom = adr_mom.iloc[-1]
+    cur_idx_mom = idx_mom.iloc[-1]
+
+    # B타입 여부
+    is_b_type = cur_idx_mom > 0 and cur_adr_mom < 0
+
+    result = {}
+    for h in horizons:
+        continuation = []  # 심화 여부 (ADR 더 하락)
+        for i in range(lookback, len(s) - h):
+            pct_i = rolling_pct.iloc[i]
+            adr_m = adr_mom.iloc[i]
+            idx_m = idx_mom.iloc[i]
+            b_type_i = idx_m > 0 and adr_m < 0
+
+            # 유사 조건 필터
+            if abs(pct_i - cur_pct) > 15:
+                continue
+            if is_b_type != b_type_i:
+                continue
+            if (cur_adr_mom < 0) != (adr_m < 0):
+                continue
+
+            # h일 후 ADR이 더 낮으면 심화, 높으면 전환
+            future_adr = s.iloc[i + h]
+            cur_adr_i = s.iloc[i]
+            continuation.append(future_adr < cur_adr_i)
+
+        n = len(continuation)
+        if n >= 5:
+            prob_cont = round(sum(continuation) / n * 100, 1)
+            result[h] = {
+                "심화": prob_cont,
+                "전환": round(100 - prob_cont, 1),
+                "표본수": n,
+            }
+        else:
+            result[h] = {"심화": None, "전환": None, "표본수": n}
+
+    return result
+
+
+def calc_prob_timeseries(adr: pd.Series, index_s: pd.Series,
+                          horizon: int = 20, lookback: int = 252) -> pd.Series:
+    """
+    매 시점의 '쏠림 심화 확률'을 롤링으로 계산해 시계열로 반환.
+    (경량 버전: ADR 백분위 + 모멘텀 + 지수방향 3변수)
+    """
+    common = adr.dropna().index.intersection(index_s.dropna().index)
+    s = adr.loc[common]
+    idx = index_s.loc[common]
+
+    rolling_pct = s.rolling(lookback, min_periods=lookback//2).rank(pct=True) * 100
+    adr_mom = s.pct_change(20)
+    idx_mom = idx.pct_change(20)
+
+    probs = []
+    dates = []
+
+    for i in range(lookback, len(s) - horizon):
+        pct_i = rolling_pct.iloc[i]
+        adr_m = adr_mom.iloc[i]
+        idx_m = idx_mom.iloc[i]
+        b_type_i = idx_m > 0 and adr_m < 0
+
+        # 유사 조건 샘플
+        cnt, cont = 0, 0
+        for j in range(max(0, i - lookback), i - horizon):
+            p_j = rolling_pct.iloc[j]
+            a_j = adr_mom.iloc[j]
+            x_j = idx_mom.iloc[j]
+            b_j = x_j > 0 and a_j < 0
+            if abs(p_j - pct_i) > 15 or b_j != b_type_i:
+                continue
+            if (a_j < 0) != (adr_m < 0):
+                continue
+            future = s.iloc[j + horizon]
+            cur_j = s.iloc[j]
+            cont += (future < cur_j)
+            cnt += 1
+
+        if cnt >= 3:
+            probs.append(cont / cnt * 100)
+        else:
+            probs.append(np.nan)
+        dates.append(s.index[i])
+
+    return pd.Series(probs, index=dates, name="쏠림심화확률")
+
+
+def get_top_sector_stocks(close: pd.DataFrame, sector_map: dict,
+                           marcap_map: dict, names: dict,
+                           period: int = 20, n: int = 5) -> pd.DataFrame:
+    """
+    섹터ADR 상위 업종 내 시총 Top N 종목 반환 (쏠림 수혜주 후보).
+    """
+    if close.empty:
+        return pd.DataFrame()
+    latest = close.index[-1]
+    row = close.loc[latest]
+    ma = close.rolling(period, min_periods=period).mean().loc[latest]
+
+    # 섹터별 MA위 비중
+    sector_ratio = {}
+    for sec in set(sector_map.values()):
+        tickers = [t for t in close.columns if sector_map.get(t) == sec]
+        if len(tickers) < 3:
+            continue
+        r = row[tickers].dropna()
+        m = ma[tickers].dropna()
+        common = r.index.intersection(m.index)
+        if len(common) < 3:
+            continue
+        sector_ratio[sec] = (r[common] > m[common]).mean()
+
+    if not sector_ratio:
+        return pd.DataFrame()
+
+    # 상위 3개 섹터
+    top_sectors = sorted(sector_ratio, key=sector_ratio.get, reverse=True)[:3]
+
+    rows = []
+    for sec in top_sectors:
+        tickers = [t for t in close.columns if sector_map.get(t) == sec]
+        # 시총 기준 정렬 후 Top N
+        sec_caps = [(t, marcap_map.get(t, 0)) for t in tickers if marcap_map.get(t, 0) > 0]
+        sec_caps.sort(key=lambda x: x[1], reverse=True)
+        for ticker, cap in sec_caps[:n]:
+            cur = row.get(ticker, np.nan)
+            ma_v = ma.get(ticker, np.nan)
+            gap = (cur / ma_v - 1) * 100 if (not np.isnan(cur) and not np.isnan(ma_v) and ma_v > 0) else np.nan
+            rows.append({
+                "업종": sec,
+                "섹터ADR(%)": round(sector_ratio[sec] * 100, 1),
+                "종목코드": ticker,
+                "종목명": names.get(ticker, ""),
+                "시가총액(억)": int(cap / 1e8),
+                "현재가": int(cur) if not np.isnan(cur) else None,
+                f"MA{period}이격(%)": round(gap, 1) if not np.isnan(gap) else None,
+            })
+
+    return pd.DataFrame(rows)
+
+
 def divergence_episodes(df_div: pd.DataFrame, index_s: pd.Series,
                         div_type: str = "bear") -> pd.DataFrame:
     """
@@ -1502,7 +1689,8 @@ for tab, market in zip(tabs, markets):
 
         # ── ⑤ 다이버전스 ─────────────────────────────────────────────────────
         with tab_div:
-            st.markdown("#### 지수 vs ADR 다이버전스 분석")
+            st.markdown("#### 📡 쏠림 국면 분석 — 심화 vs 전환 확률")
+            st.caption("지수와 ADR의 방향 괴리를 분석해 쏠림 지속·전환 확률과 국면별 집중 종목을 제시합니다.")
 
             if index_s is None:
                 st.warning("지수 데이터가 없어 다이버전스 분석을 실행할 수 없습니다.")
@@ -1514,120 +1702,190 @@ for tab, market in zip(tabs, markets):
                     help="지수와 ADR의 변화를 비교할 기간. 20이면 '지난 20거래일 동안 지수가 몇% 변했고 ADR이 몇% 변했는지'를 비교. 짧으면 노이즈 많고, 길면 큰 추세 전환만 감지.")
 
                 df_div = calc_divergence(adr_all[div_period], index_s, div_window)
-
-                # 현재 상황 요약
                 latest_div = df_div.iloc[-1]
                 bear_now = bool(latest_div["bear_div"])
                 bull_now = bool(latest_div["bull_div"])
                 div_str = latest_div["idx_chg"] - latest_div["adr_chg"]
-
-                col_a, col_b, col_c = st.columns(3)
-                col_a.metric("현재 다이버전스 강도",
-                             f"{div_str:+.1f}%p",
-                             help="지수 변화율 - ADR 변화율. 양수가 클수록 지수는 오르는데 ADR은 빠지는 쏠림장. 음수면 지수는 빠지는데 ADR은 올라오는 내부 강화 신호.")
-                col_b.metric(f"지수 {div_window}일 변화율", f"{latest_div['idx_chg']:+.1f}%",
-                             help=f"최근 {div_window}거래일 동안 코스피/코스닥 지수가 몇% 움직였는지.")
-                col_c.metric(f"ADR {div_window}일 변화율", f"{latest_div['adr_chg']:+.1f}%",
-                             help=f"최근 {div_window}거래일 동안 ADR 수치 자체가 몇% 변했는지. 지수 변화율과 반대 방향이면 다이버전스 발생.")
-
-                # ── 신호 스코어카드 ──────────────────────────────────────────
                 sig = divergence_signal_score(df_div)
-                score = sig["score"]
-                if score >= 70:
-                    sig_color = "🔴"; sig_label = "위험 — 강한 쏠림 경고"
-                elif score >= 40:
-                    sig_color = "🟠"; sig_label = "주의 — 쏠림 진행 중"
-                elif score >= 20:
-                    sig_color = "🟡"; sig_label = "관찰 — 초기 신호"
-                else:
-                    sig_color = "🟢"; sig_label = "정상"
-
-                st.markdown(f"### {sig_color} 현재 약세 다이버전스 경보: **{score:.0f}점** / 100 — {sig_label}")
-                sc1, sc2, sc3 = st.columns(3)
-                sc1.metric("연속 베어 다이버전스", f"{sig['consecutive_days']}일",
-                           help="오늘 기준으로 약세 다이버전스(지수↑ ADR↓)가 끊기지 않고 연속으로 감지된 거래일 수. 길수록 쏠림이 오래 지속 중이라는 의미. 0이면 최근에는 다이버전스 없음.")
-                sc2.metric("전체 기간 내 빈도", f"{sig['bear_pct']:.1f}%",
-                           help="전체 분석 기간(10년) 중 약세 다이버전스가 발생한 날의 비율. 높을수록 이 시장에서 쏠림이 구조적으로 자주 발생한다는 의미.")
-                sc3.metric("최근 강도", f"{sig['strength']:.1f}%p",
-                           help=f"지수 {div_window}일 변화율과 ADR {div_window}일 변화율의 차이. 예: 지수 +5%, ADR -15%면 강도=20%p. 클수록 지수와 내부 체력의 괴리가 심한 극단 쏠림.")
-
-                # ── 데이터 연동 내러티브 ──────────────────────────────────────
-                df_bear_ep = divergence_episodes(df_div, index_s, "bear")
-                df_bull_ep = divergence_episodes(df_div, index_s, "bull")
                 consecutive = sig["consecutive_days"]
 
+                # ── A/B 타입 판정 ────────────────────────────────────────────
+                ab_type = classify_ab_type(adr_all[div_period], index_s)
+                if ab_type == "B":
+                    type_label = "🔴 B타입 — 지수 상승 중 ADR만 하락 (쏠림장)"
+                    type_desc = "소수 대형주가 지수를 끌어올리는 집중 장세. 역사적으로 쏠림이 더 심화되는 경향."
+                elif ab_type == "A":
+                    type_label = "🟡 A타입 — 전체 하락장 중 ADR 동반 하락"
+                    type_desc = "시장 전체가 조정 중. ADR 극단 수준이면 중소형주 바닥 탐색 신호로 볼 수 있음."
+                else:
+                    type_label = "🟢 중립 — 지수와 ADR 방향 일치"
+                    type_desc = "뚜렷한 쏠림 없음. 건강한 장세."
+
+                st.markdown(f"### {type_label}")
+                st.caption(type_desc)
+                st.divider()
+
+                # ── 확률 계산 ─────────────────────────────────────────────────
+                st.markdown("#### 📊 쏠림 심화 vs 전환 확률 (역사적 통계 기반)")
+                with st.spinner("과거 유사 국면 분석 중..."):
+                    probs = calc_concentration_probability(
+                        adr_all[div_period], index_s, horizons=[5, 20, 60]
+                    )
+
+                prob_cols = st.columns(3)
+                horizon_labels = {5: "5일 후", 20: "20일 후", 60: "60일 후"}
+                for col_p, h in zip(prob_cols, [5, 20, 60]):
+                    p = probs.get(h, {})
+                    cont = p.get("심화")
+                    rev = p.get("전환")
+                    n = p.get("표본수", 0)
+                    with col_p:
+                        if cont is not None:
+                            color = "🔴" if cont >= 60 else ("🟡" if cont >= 45 else "🟢")
+                            st.metric(
+                                f"{horizon_labels[h]} 쏠림 심화",
+                                f"{cont:.0f}%",
+                                help=f"과거 유사 조건(ADR 백분위·타입·모멘텀 유사) {n}개 샘플 중 {h}일 후 ADR이 더 하락한 비율."
+                            )
+                            st.markdown(f"{color} **심화 {cont:.0f}%** / 전환 {rev:.0f}%  `n={n}`")
+                        else:
+                            st.metric(f"{horizon_labels[h]} 쏠림 심화", "데이터 부족")
+                            st.caption(f"유사 샘플 {n}개 (최소 5개 필요)")
+
+                # ── 내러티브 ─────────────────────────────────────────────────
+                df_bear_ep = divergence_episodes(df_div, index_s, "bear")
+                df_bull_ep = divergence_episodes(df_div, index_s, "bull")
+
+                p20 = probs.get(20, {})
+                cont20 = p20.get("심화") or 50
+
                 if bear_now:
-                    # 현재와 유사한 과거 에피소드 (지속일 ± 50% 범위) 추출
                     finished_bear = df_bear_ep[df_bear_ep["종료"] != "진행중 🔴"]
-                    similar = finished_bear[finished_bear["지속(일)"] >= consecutive * 0.5] if not finished_bear.empty else pd.DataFrame()
+                    similar = finished_bear[finished_bear["지속(일)"] >= max(consecutive * 0.5, 3)] if not finished_bear.empty else pd.DataFrame()
                     total_sim = len(similar)
-
-                    lines = [f"⚠️ **현재 연속 {consecutive}일째 약세 다이버전스 진행 중.**"]
-
+                    lines = [f"⚠️ **현재 연속 {consecutive}일째 약세 다이버전스 ({ab_type}타입) 진행 중.**"]
+                    if cont20 >= 60:
+                        lines.append(f"📈 **20일 기준 쏠림 심화 확률 {cont20:.0f}%** — 과거 유사 국면에서 쏠림이 더 심화된 경우가 우세합니다. 대형주 중심 포지션이 유리한 국면.")
+                    elif cont20 <= 40:
+                        lines.append(f"🔄 **20일 기준 전환 확률 {100-cont20:.0f}%** — 과거 유사 국면에서 ADR 반등(전환)이 우세했습니다. 중소형 낙폭과대주 관심 시기.")
+                    else:
+                        lines.append(f"⚖️ **방향성 혼재 (심화 {cont20:.0f}% / 전환 {100-cont20:.0f}%)** — 명확한 방향 베팅보다 종목 선별 집중.")
                     if total_sim > 0:
                         neg60 = similar["+60일 수익률"].dropna()
-                        neg120 = similar["+120일 수익률"].dropna()
-                        down60 = (neg60 < 0).sum()
-                        down120 = (neg120 < 0).sum()
-                        avg60 = neg60.mean()
-                        avg120 = neg120.mean()
-                        lines.append(
-                            f"과거 {consecutive}일 이상 지속된 유사 에피소드 **{total_sim}건** 분석 결과, "
-                            f"종료 후 60일 내 지수 하락은 **{down60}/{len(neg60)}건** (평균 {avg60:+.1f}%), "
-                            f"120일 내 하락은 **{down120}/{len(neg120)}건** (평균 {avg120:+.1f}%)."
-                        )
-                        if avg60 < -3:
-                            lines.append("📌 **역사적으로 이 국면 이후 조정 압력이 우세했습니다.** 신규 비중 확대보다 기존 포지션 점검이 유효한 시기입니다.")
-                        elif avg60 > 3:
-                            lines.append("📌 **과거 유사 국면 이후 오히려 지수가 상승한 사례가 많습니다.** 대형주 주도 모멘텀이 이어질 가능성도 고려하세요.")
-                        else:
-                            lines.append("📌 **과거 유사 국면 이후 방향성이 혼재합니다.** 섣부른 방향 베팅보다 종목 선별에 집중하는 시기입니다.")
-                    else:
-                        lines.append("과거 데이터에서 유사 길이의 에피소드가 충분하지 않아 통계 산출이 어렵습니다.")
-
+                        if len(neg60) > 0:
+                            down60 = (neg60 < 0).sum()
+                            avg60 = neg60.mean()
+                            lines.append(f"과거 {consecutive}일 이상 유사 에피소드 **{total_sim}건** → 60일 후 지수 하락 **{down60}/{len(neg60)}건** (평균 {avg60:+.1f}%)")
                     st.error("\n\n".join(lines))
 
                 elif bull_now:
                     finished_bull = df_bull_ep[df_bull_ep["종료"] != "진행중 🔴"]
-                    similar = finished_bull[finished_bull["지속(일)"] >= consecutive * 0.5] if not finished_bull.empty else pd.DataFrame()
-                    total_sim = len(similar)
-
+                    similar = finished_bull[finished_bull["지속(일)"] >= max(consecutive * 0.5, 3)] if not finished_bull.empty else pd.DataFrame()
                     lines = [f"✅ **현재 연속 {consecutive}일째 강세 다이버전스 진행 중.**"]
-
-                    if total_sim > 0:
+                    lines.append("지수 하락 중에도 ADR이 올라오는 신호 — 내부 체력 회복 중. 중소형 낙폭과대주 선별 타이밍.")
+                    if len(similar) > 0:
                         pos60 = similar["+60일 수익률"].dropna()
-                        up60 = (pos60 > 0).sum()
-                        avg60 = pos60.mean()
-                        lines.append(
-                            f"과거 {consecutive}일 이상 지속된 유사 에피소드 **{total_sim}건** 분석 결과, "
-                            f"종료 후 60일 내 지수 상승은 **{up60}/{len(pos60)}건** (평균 {avg60:+.1f}%)."
-                        )
-                        if avg60 > 3:
-                            lines.append("📌 **역사적으로 이 국면 이후 지수 반등 가능성이 높았습니다.** 낙폭 과대 우량주 중심의 선별적 대응을 고려할 시기입니다.")
-                        else:
-                            lines.append("📌 **과거 유사 국면 이후 방향성이 혼재합니다.** 급반등 기대보다 분할 접근이 적합합니다.")
-                    else:
-                        lines.append("과거 데이터에서 유사 길이의 에피소드가 충분하지 않습니다.")
-
+                        if len(pos60) > 0:
+                            avg60 = pos60.mean()
+                            lines.append(f"과거 유사 에피소드 **{len(similar)}건** → 60일 후 평균 {avg60:+.1f}%")
                     st.success("\n\n".join(lines))
 
                 else:
                     last_bear_ep = df_bear_ep[df_bear_ep["종료"] != "진행중 🔴"]
                     if not last_bear_ep.empty:
                         last_end = last_bear_ep.iloc[-1]["종료"]
-                        st.info(f"현재 뚜렷한 다이버전스 없음 — 지수와 ADR이 동행 중. "
-                                f"직전 약세 다이버전스 에피소드는 {last_end} 종료.")
+                        st.info(f"현재 뚜렷한 다이버전스 없음. 직전 약세 에피소드 종료: {last_end}")
                     else:
                         st.info("현재 뚜렷한 다이버전스 없음 (지수와 ADR 방향 일치)")
 
-                bear_ep_count = df_div["bear_div"].sum()
-                bull_ep_count = df_div["bull_div"].sum()
-                st.caption(f"전체 기간 중 약세 다이버전스: {bear_ep_count}일  |  강세 다이버전스: {bull_ep_count}일")
+                # ── 확률 시계열 차트 (백테스트) ───────────────────────────────
+                st.divider()
+                st.markdown("#### 📈 쏠림 심화 확률 시계열 — 자체 백테스트")
+                st.caption("매 시점의 '쏠림 심화 확률'을 과거로 소급해 계산. 확률이 높았던 구간 이후 지수가 실제로 어떻게 됐는지 육안으로 확인 가능.")
+                with st.spinner("확률 시계열 계산 중 (수초 소요)..."):
+                    prob_ts = calc_prob_timeseries(adr_all[div_period], index_s, horizon=20)
 
+                if prob_ts.dropna().empty:
+                    st.info("시계열 데이터 부족")
+                else:
+                    idx_s_common = index_s.reindex(prob_ts.index).ffill()
+                    fig_pts = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                                           row_heights=[0.5, 0.5],
+                                           subplot_titles=["지수", "쏠림 심화 확률 (20일 기준)"])
+                    fig_pts.add_trace(go.Scatter(x=idx_s_common.index, y=idx_s_common.values,
+                                                  name="지수", line=dict(color="#607D8B", width=1)),
+                                      row=1, col=1)
+                    # 확률 70% 이상 구간 음영
+                    high_prob = prob_ts.where(prob_ts >= 70)
+                    fig_pts.add_trace(go.Scatter(x=prob_ts.index, y=prob_ts.values,
+                                                  name="심화확률%", line=dict(color="#F44336", width=1.2)),
+                                      row=2, col=1)
+                    fig_pts.add_trace(go.Scatter(x=high_prob.index, y=high_prob.values,
+                                                  fill="tozeroy", name="심화확률≥70%",
+                                                  fillcolor="rgba(244,67,54,0.2)",
+                                                  line=dict(color="rgba(0,0,0,0)")),
+                                      row=2, col=1)
+                    fig_pts.add_hline(y=70, line_dash="dash", line_color="red",
+                                      line_width=0.8, row=2, col=1)
+                    fig_pts.add_hline(y=50, line_dash="dot", line_color="gray",
+                                      line_width=0.8, row=2, col=1)
+                    fig_pts.update_layout(height=450, showlegend=False,
+                                          margin=dict(l=40, r=40, t=40, b=20))
+                    st.plotly_chart(fig_pts, use_container_width=True)
+
+                # ── 다이버전스 차트 ───────────────────────────────────────────
                 st.plotly_chart(
                     build_divergence_chart(df_div, market, div_period, date_from, date_to),
                     use_container_width=True
                 )
+
+                # ── 국면별 집중 종목 ──────────────────────────────────────────
+                st.divider()
+                st.markdown("#### 🎯 국면별 집중 종목")
+                focus_tab1, focus_tab2 = st.tabs(["📈 쏠림 수혜주 (대형주 집중)", "🔄 전환 수혜주 (낙폭과대 반등)"])
+
+                with focus_tab1:
+                    st.caption("섹터ADR 상위 업종 내 시총 상위 종목 — 쏠림 지속 시 수혜 가능성이 높은 대형주.")
+                    with st.spinner("섹터 분석 중..."):
+                        _sec_map = get_sector_map(market)
+                        _mc_map = get_marcap_map(market)
+                        _names = get_stock_names(market)
+                        df_top = get_top_sector_stocks(close, _sec_map, _mc_map, _names,
+                                                        period=div_period, n=5)
+                    if df_top.empty:
+                        st.info("데이터 부족")
+                    else:
+                        df_top_linked = add_naver_link(df_top)
+                        st.dataframe(df_top_linked, use_container_width=True, hide_index=True,
+                                     column_config={
+                                         "차트": st.column_config.LinkColumn("차트", display_text="📈"),
+                                         "섹터ADR(%)": st.column_config.ProgressColumn(
+                                             "섹터ADR(%)", min_value=0, max_value=100, format="%.1f"),
+                                         "시가총액(억)": st.column_config.NumberColumn(format="%d억"),
+                                     })
+
+                with focus_tab2:
+                    st.caption("반등잠재력 점수 상위 + 시총 필터 — 쏠림 해소 시 중소형 반등 수혜 후보.")
+                    foc_min_cap = st.number_input("최소 시가총액(억)", 0, 50000, 500, step=100,
+                                                   key=f"foc_cap_{market}",
+                                                   help="너무 작은 잡주 제외. 500억 이상 권장.")
+                    with st.spinner("반등 후보 계산 중..."):
+                        df_rev = calc_rebound_score(close, _sec_map, _mc_map, periods,
+                                                     top_n=30, min_marcap_eok=foc_min_cap)
+                    if df_rev.empty:
+                        st.info("데이터 부족")
+                    else:
+                        df_rev.insert(1, "종목명", df_rev["종목코드"].map(_names).fillna(""))
+                        df_rev_linked = add_naver_link(df_rev)
+                        st.dataframe(df_rev_linked, use_container_width=True, hide_index=True,
+                                     column_config={
+                                         "차트": st.column_config.LinkColumn("차트", display_text="📈"),
+                                         "반등잠재력": st.column_config.ProgressColumn(
+                                             "반등잠재력", min_value=0, max_value=100, format="%.0f점"),
+                                         "시가총액(억)": st.column_config.NumberColumn(format="%d억"),
+                                         "MA이격(%)": st.column_config.NumberColumn(format="%.1f%%"),
+                                         "RSI14": st.column_config.NumberColumn(format="%.1f"),
+                                     })
 
                 # ── 에피소드 백테스트 ─────────────────────────────────────────
                 st.divider()
@@ -1640,11 +1898,9 @@ for tab, market in zip(tabs, markets):
                 if df_ep.empty:
                     st.info("에피소드 없음")
                 else:
-                    # 요약 통계
                     fwd_cols = [c for c in df_ep.columns if "수익률" in c]
                     finished = df_ep[df_ep["종료"] != "진행중 🔴"]
                     if not finished.empty and fwd_cols:
-                        st.markdown("**과거 에피소드 종료 후 평균 수익률**")
                         avg_row = {c: finished[c].mean() for c in fwd_cols}
                         med_row = {c: finished[c].median() for c in fwd_cols}
                         smr = pd.DataFrame([
@@ -1652,17 +1908,12 @@ for tab, market in zip(tabs, markets):
                             {"구분": "중앙값", **{c: f"{v:+.1f}%" for c, v in med_row.items()}},
                         ])
                         st.dataframe(smr, use_container_width=True, hide_index=True)
-
-                    st.markdown("**전체 에피소드 목록**")
-                    st.dataframe(
-                        df_ep,
-                        use_container_width=True, hide_index=True,
-                        column_config={
-                            "+20일 수익률": st.column_config.NumberColumn(format="%.1f%%"),
-                            "+60일 수익률": st.column_config.NumberColumn(format="%.1f%%"),
-                            "+120일 수익률": st.column_config.NumberColumn(format="%.1f%%"),
-                        }
-                    )
+                    st.dataframe(df_ep, use_container_width=True, hide_index=True,
+                                 column_config={
+                                     "+20일 수익률": st.column_config.NumberColumn(format="%.1f%%"),
+                                     "+60일 수익률": st.column_config.NumberColumn(format="%.1f%%"),
+                                     "+120일 수익률": st.column_config.NumberColumn(format="%.1f%%"),
+                                 })
 
         # ── ⑥ 종목 스크리너 ──────────────────────────────────────────────────
         with tab_screen:
