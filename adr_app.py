@@ -1294,7 +1294,8 @@ with st.sidebar:
 
     st.markdown("**이동평균 기간 (일)**")
     col1, col2 = st.columns(2)
-    preset = col1.selectbox("프리셋", ["5 / 10 / 20", "10 / 20 / 60", "20 / 60 / 120", "직접 입력"])
+    preset = col1.selectbox("프리셋", ["5 / 10 / 20", "10 / 20 / 60", "20 / 60 / 120", "직접 입력"],
+        help="ADR 계산에 사용할 이동평균선 기간. 5일=단기 민감, 20일=중기 추세, 60일=장기 흐름. 여러 기간을 동시에 보면 단기·중기·장기 시장 체력을 함께 파악할 수 있습니다.")
     if preset == "직접 입력":
         custom = col2.text_input("기간 (쉼표 구분)", "5,10,20")
         try:
@@ -1401,9 +1402,11 @@ for tab, market in zip(tabs, markets):
                 with col_s:
                     st.metric(label=f"ADR {p}일  |  {st_d['signal']}",
                               value=f"{st_d['current']:.3f}",
-                              delta=f"{st_d['current'] - st_d['mean']:+.3f} (평균 대비)")
+                              delta=f"{st_d['current'] - st_d['mean']:+.3f} (평균 대비)",
+                              help=f"ADR = {p}일 이평선 위 종목 수 ÷ 아래 종목 수. 1.0이면 위아래 동수(중립). 1.0 초과면 과반이 이평 위(강세), 미만이면 과반이 이평 아래(약세).")
                     st.markdown(f"**백분위: {st_d['pct']:.1f}%** | Z: `{st_d['z']:+.2f}`",
                                 unsafe_allow_html=True)
+                    st.caption(f"백분위: 현재 ADR이 과거 10년 중 하위 몇 %에 해당하는지. 10% 이하면 역대급 약세. | Z-score: 평균에서 표준편차 몇 배 떨어져 있는지. -2 이하면 통계적 극단.")
                     st.markdown(f"평균 `{st_d['mean']:.3f}` ± σ `{st_d['std']:.3f}`")
 
             st.divider()
@@ -1436,9 +1439,12 @@ for tab, market in zip(tabs, markets):
                 st.warning("지수 데이터가 없어 백테스트를 실행할 수 없습니다.")
             else:
                 bc1, bc2, bc3 = st.columns(3)
-                bt_period = bc1.selectbox("ADR 기간", periods, key=f"bt_p_{market}")
-                bt_threshold = bc2.slider("극단 기준 (%ile)", 1, 20, 10, key=f"bt_th_{market}")
-                bt_dir = bc3.radio("방향", ["과매도 (하위)", "과매수 (상위)"], key=f"bt_dir_{market}")
+                bt_period = bc1.selectbox("ADR 기간", periods, key=f"bt_p_{market}",
+                    help="백테스트에 사용할 ADR 기간. 20일이 가장 일반적인 중기 기준.")
+                bt_threshold = bc2.slider("극단 기준 (%ile)", 1, 20, 10, key=f"bt_th_{market}",
+                    help="ADR이 역대 몇 % 이하(과매도) 또는 이상(과매수)일 때를 극단 구간으로 볼지. 10이면 하위 10%=역대 과매도 구간 진입 시점.")
+                bt_dir = bc3.radio("방향", ["과매도 (하위)", "과매수 (상위)"], key=f"bt_dir_{market}",
+                    help="과매도: ADR이 극단으로 낮을 때(대부분 종목이 이평 아래, 쏠림 or 하락장). 과매수: ADR이 극단으로 높을 때(대부분 종목이 이평 위, 과열 장세).")
                 direction = "low" if "하위" in bt_dir else "high"
 
                 res = run_backtest(adr_all[bt_period], index_s, bt_threshold, direction)
@@ -1502,8 +1508,10 @@ for tab, market in zip(tabs, markets):
                 st.warning("지수 데이터가 없어 다이버전스 분석을 실행할 수 없습니다.")
             else:
                 dv1, dv2 = st.columns(2)
-                div_period = dv1.selectbox("ADR 기간", periods, key=f"div_p_{market}")
-                div_window = dv2.slider("다이버전스 측정 윈도우 (거래일)", 5, 60, 20, key=f"div_w_{market}")
+                div_period = dv1.selectbox("ADR 기간", periods, key=f"div_p_{market}",
+                    help="어떤 이동평균선 기준으로 ADR을 계산할지 선택. 예: 20일이면 각 종목의 현재가가 20일 이평선 위인지 아래인지로 구분.")
+                div_window = dv2.slider("다이버전스 측정 윈도우 (거래일)", 5, 60, 20, key=f"div_w_{market}",
+                    help="지수와 ADR의 변화를 비교할 기간. 20이면 '지난 20거래일 동안 지수가 몇% 변했고 ADR이 몇% 변했는지'를 비교. 짧으면 노이즈 많고, 길면 큰 추세 전환만 감지.")
 
                 df_div = calc_divergence(adr_all[div_period], index_s, div_window)
 
@@ -1516,9 +1524,11 @@ for tab, market in zip(tabs, markets):
                 col_a, col_b, col_c = st.columns(3)
                 col_a.metric("현재 다이버전스 강도",
                              f"{div_str:+.1f}%p",
-                             help="양수=약세다이버전스(지수↑ ADR↓), 음수=강세다이버전스(지수↓ ADR↑)")
-                col_b.metric(f"지수 {div_window}일 변화율", f"{latest_div['idx_chg']:+.1f}%")
-                col_c.metric(f"ADR {div_window}일 변화율", f"{latest_div['adr_chg']:+.1f}%")
+                             help="지수 변화율 - ADR 변화율. 양수가 클수록 지수는 오르는데 ADR은 빠지는 쏠림장. 음수면 지수는 빠지는데 ADR은 올라오는 내부 강화 신호.")
+                col_b.metric(f"지수 {div_window}일 변화율", f"{latest_div['idx_chg']:+.1f}%",
+                             help=f"최근 {div_window}거래일 동안 코스피/코스닥 지수가 몇% 움직였는지.")
+                col_c.metric(f"ADR {div_window}일 변화율", f"{latest_div['adr_chg']:+.1f}%",
+                             help=f"최근 {div_window}거래일 동안 ADR 수치 자체가 몇% 변했는지. 지수 변화율과 반대 방향이면 다이버전스 발생.")
 
                 # ── 신호 스코어카드 ──────────────────────────────────────────
                 sig = divergence_signal_score(df_div)
@@ -1535,11 +1545,11 @@ for tab, market in zip(tabs, markets):
                 st.markdown(f"### {sig_color} 현재 약세 다이버전스 경보: **{score:.0f}점** / 100 — {sig_label}")
                 sc1, sc2, sc3 = st.columns(3)
                 sc1.metric("연속 베어 다이버전스", f"{sig['consecutive_days']}일",
-                           help="현재 기준 연속으로 약세 다이버전스가 감지된 거래일 수")
+                           help="오늘 기준으로 약세 다이버전스(지수↑ ADR↓)가 끊기지 않고 연속으로 감지된 거래일 수. 길수록 쏠림이 오래 지속 중이라는 의미. 0이면 최근에는 다이버전스 없음.")
                 sc2.metric("전체 기간 내 빈도", f"{sig['bear_pct']:.1f}%",
-                           help="전체 분석 기간 중 약세 다이버전스가 발생한 날의 비율")
+                           help="전체 분석 기간(10년) 중 약세 다이버전스가 발생한 날의 비율. 높을수록 이 시장에서 쏠림이 구조적으로 자주 발생한다는 의미.")
                 sc3.metric("최근 강도", f"{sig['strength']:.1f}%p",
-                           help="지수 변화율 - ADR 변화율. 클수록 지수와 ADR 괴리 심함")
+                           help=f"지수 {div_window}일 변화율과 ADR {div_window}일 변화율의 차이. 예: 지수 +5%, ADR -15%면 강도=20%p. 클수록 지수와 내부 체력의 괴리가 심한 극단 쏠림.")
 
                 # ── 데이터 연동 내러티브 ──────────────────────────────────────
                 df_bear_ep = divergence_episodes(df_div, index_s, "bear")
@@ -1666,7 +1676,8 @@ for tab, market in zip(tabs, markets):
                 "MA 대비 많이 하락 (반등 후보)",
                 "MA 대비 많이 상승 (과열 종목)",
             ], key=f"sc_m_{market}")
-            screen_days = sr3.slider("전환 감지 기간 (일)", 1, 10, 3, key=f"sc_d_{market}")
+            screen_days = sr3.slider("전환 감지 기간 (일)", 1, 10, 3, key=f"sc_d_{market}",
+                help="MA 위/아래로 전환된 걸 최근 며칠 이내로 볼지. 3이면 최근 3거래일 내에 이평선을 돌파/이탈한 종목만 표시.")
 
             dir_map = {
                 "MA 위로 막 전환 (돌파 후보)": "cross_up",
@@ -1706,8 +1717,10 @@ for tab, market in zip(tabs, markets):
 
             rv1, rv2, rv3 = st.columns(3)
             rec_period = rv1.selectbox("ADR 기간", periods, key=f"rv_p_{market}")
-            rec_enter = rv2.slider("진입 기준 (%ile)", 1, 20, 10, key=f"rv_e_{market}")
-            rec_exit = rv3.slider("회복 기준 (%ile)", 30, 70, 50, key=f"rv_x_{market}")
+            rec_enter = rv2.slider("진입 기준 (%ile)", 1, 20, 10, key=f"rv_e_{market}",
+                help="ADR이 역대 몇 % 이하로 내려갔을 때를 '과매도 에피소드 진입'으로 볼지. 10이면 역대 하위 10% 진입 시점부터 에피소드 시작.")
+            rec_exit = rv3.slider("회복 기준 (%ile)", 30, 70, 50, key=f"rv_x_{market}",
+                help="ADR이 어느 수준까지 올라왔을 때를 '회복 완료'로 볼지. 50이면 ADR이 역대 중간값(50%)까지 회복되면 에피소드 종료로 판단.")
 
             rec = recovery_analysis(adr_all[rec_period], rec_enter, rec_exit)
 
@@ -1735,10 +1748,14 @@ for tab, market in zip(tabs, markets):
 
                 # 통계 카드
                 rc1, rc2, rc3, rc4 = st.columns(4)
-                rc1.metric("중앙값 회복 기간", f"{rec['median_days']}일")
-                rc2.metric("평균 회복 기간", f"{rec['mean_days']}일")
-                rc3.metric("25% 빠른 회복", f"{rec['p25_days']}일")
-                rc4.metric("75% 느린 회복", f"{rec['p75_days']}일")
+                rc1.metric("중앙값 회복 기간", f"{rec['median_days']}일",
+                           help="과거 에피소드들에서 ADR이 회복 기준까지 올라오는 데 걸린 기간의 중앙값. 평균보다 이상치에 덜 민감해서 더 신뢰도 높음.")
+                rc2.metric("평균 회복 기간", f"{rec['mean_days']}일",
+                           help="과거 에피소드들의 평균 회복 기간. 특히 오래 걸린 에피소드가 있으면 평균이 길어질 수 있음.")
+                rc3.metric("25% 빠른 회복", f"{rec['p25_days']}일",
+                           help="과거 에피소드 중 빠른 편(상위 25%)의 회복 기간. 빠르게 해소된 경우의 기준선.")
+                rc4.metric("75% 느린 회복", f"{rec['p75_days']}일",
+                           help="과거 에피소드 중 느린 편(하위 25%)의 회복 기간. 길게 끌린 경우의 기준선.")
 
                 st.plotly_chart(build_recovery_chart(rec, adr_all[rec_period], rec_period),
                                 use_container_width=True)
@@ -1755,8 +1772,10 @@ for tab, market in zip(tabs, markets):
             )
 
             rb1, rb2, rb3 = st.columns(3)
-            rb_top_n = rb1.slider("상위 종목 수", 20, 100, 50, step=10, key=f"rb_n_{market}")
-            rb_periods_label = rb2.selectbox("기준 이평 (이격 계산)", periods, key=f"rb_p_{market}")
+            rb_top_n = rb1.slider("상위 종목 수", 20, 100, 50, step=10, key=f"rb_n_{market}",
+                help="반등잠재력 점수 상위 몇 개 종목을 표시할지.")
+            rb_periods_label = rb2.selectbox("기준 이평 (이격 계산)", periods, key=f"rb_p_{market}",
+                help="MA 이격 점수 계산 시 기준이 되는 이평 기간. 20일 이평 대비 현재가가 얼마나 아래에 있는지로 반등 여력을 측정.")
             rb_min_marcap = rb3.number_input(
                 "최소 시가총액 (억원)", min_value=0, max_value=100000,
                 value=500, step=100, key=f"rb_marcap_{market}",
