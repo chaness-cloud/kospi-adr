@@ -892,7 +892,9 @@ def get_top_sector_stocks(close: pd.DataFrame, sector_map: dict,
                            marcap_map: dict, names: dict,
                            period: int = 20, n: int = 5) -> pd.DataFrame:
     """
-    섹터ADR 상위 업종 내 시총 Top N 종목 반환 (쏠림 수혜주 후보).
+    섹터ADR 상위 업종 내 쏠림 수혜주 후보.
+    스코어 = MA위 종목만 필터 + MA이격(%) 정규화×50 + 시총 정규화×50
+    → MA 위에 있으면서 모멘텀 강하고 대형주인 종목 순.
     """
     if close.empty:
         return pd.DataFrame()
@@ -922,13 +924,42 @@ def get_top_sector_stocks(close: pd.DataFrame, sector_map: dict,
     rows = []
     for sec in top_sectors:
         tickers = [t for t in close.columns if sector_map.get(t) == sec]
-        # 시총 기준 정렬 후 Top N
-        sec_caps = [(t, marcap_map.get(t, 0)) for t in tickers if marcap_map.get(t, 0) > 0]
-        sec_caps.sort(key=lambda x: x[1], reverse=True)
-        for ticker, cap in sec_caps[:n]:
+
+        # 종목별 스코어 계산
+        candidates = []
+        for t in tickers:
+            cur = row.get(t, np.nan)
+            ma_v = ma.get(t, np.nan)
+            cap = marcap_map.get(t, 0)
+            if np.isnan(cur) or np.isnan(ma_v) or ma_v <= 0 or cap <= 0:
+                continue
+            above_ma = cur > ma_v          # MA 위 여부
+            if not above_ma:
+                continue                   # MA 아래 종목 제외
+            gap = (cur / ma_v - 1) * 100  # MA 이격률 (양수 = MA 위)
+            candidates.append((t, cap, gap))
+
+        if not candidates:
+            continue
+
+        # 정규화 (0~1)
+        caps = [c[1] for c in candidates]
+        gaps = [c[2] for c in candidates]
+        cap_min, cap_max = min(caps), max(caps)
+        gap_min, gap_max = min(gaps), max(gaps)
+
+        def norm(v, mn, mx):
+            return (v - mn) / (mx - mn) if mx > mn else 0.5
+
+        scored = sorted(
+            [(t, cap, gap,
+              norm(gap, gap_min, gap_max) * 50 + norm(cap, cap_min, cap_max) * 50)
+             for t, cap, gap in candidates],
+            key=lambda x: x[3], reverse=True
+        )
+
+        for ticker, cap, gap, score in scored[:n]:
             cur = row.get(ticker, np.nan)
-            ma_v = ma.get(ticker, np.nan)
-            gap = (cur / ma_v - 1) * 100 if (not np.isnan(cur) and not np.isnan(ma_v) and ma_v > 0) else np.nan
             rows.append({
                 "업종": sec,
                 "섹터ADR(%)": round(sector_ratio[sec] * 100, 1),
@@ -936,10 +967,13 @@ def get_top_sector_stocks(close: pd.DataFrame, sector_map: dict,
                 "종목명": names.get(ticker, ""),
                 "시가총액(억)": int(cap / 1e8),
                 "현재가": int(cur) if not np.isnan(cur) else None,
-                f"MA{period}이격(%)": round(gap, 1) if not np.isnan(gap) else None,
+                f"MA{period}이격(%)": round(gap, 1),
+                "쏠림스코어": round(score, 1),
             })
 
-    return pd.DataFrame(rows)
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values("쏠림스코어", ascending=False)
 
 
 def divergence_episodes(df_div: pd.DataFrame, index_s: pd.Series,
@@ -1888,6 +1922,9 @@ for tab, market in zip(tabs, markets):
                                          "섹터ADR(%)": st.column_config.ProgressColumn(
                                              "섹터ADR(%)", min_value=0, max_value=100, format="%.1f"),
                                          "시가총액(억)": st.column_config.NumberColumn(format="%d억"),
+                                         "쏠림스코어": st.column_config.ProgressColumn(
+                                             "쏠림스코어", min_value=0, max_value=100, format="%.0f",
+                                             help="MA이격(모멘텀)×50 + 시총×50. 높을수록 쏠림 수혜 가능성 높은 종목."),
                                      })
 
                 with focus_tab2:
