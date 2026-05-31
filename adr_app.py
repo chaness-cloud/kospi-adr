@@ -28,7 +28,7 @@ st.set_page_config(
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".adr_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
-YEARS = 5
+YEARS = 10
 
 
 # ── 날짜 ────────────────────────────────────────────────────────────────────
