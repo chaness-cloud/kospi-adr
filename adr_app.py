@@ -1541,14 +1541,74 @@ for tab, market in zip(tabs, markets):
                 sc3.metric("최근 강도", f"{sig['strength']:.1f}%p",
                            help="지수 변화율 - ADR 변화율. 클수록 지수와 ADR 괴리 심함")
 
+                # ── 데이터 연동 내러티브 ──────────────────────────────────────
+                df_bear_ep = divergence_episodes(df_div, index_s, "bear")
+                df_bull_ep = divergence_episodes(df_div, index_s, "bull")
+                consecutive = sig["consecutive_days"]
+
                 if bear_now:
-                    st.error(f"⚠️ **약세 다이버전스 진행 중** — 지수 상승 + ADR 하락. "
-                             f"소수 대형주가 지수를 끌어올리는 집중 장세. 내부 체력 약화.")
+                    # 현재와 유사한 과거 에피소드 (지속일 ± 50% 범위) 추출
+                    finished_bear = df_bear_ep[df_bear_ep["종료"] != "진행중 🔴"]
+                    similar = finished_bear[finished_bear["지속(일)"] >= consecutive * 0.5] if not finished_bear.empty else pd.DataFrame()
+                    total_sim = len(similar)
+
+                    lines = [f"⚠️ **현재 연속 {consecutive}일째 약세 다이버전스 진행 중.**"]
+
+                    if total_sim > 0:
+                        neg60 = similar["+60일 수익률"].dropna()
+                        neg120 = similar["+120일 수익률"].dropna()
+                        down60 = (neg60 < 0).sum()
+                        down120 = (neg120 < 0).sum()
+                        avg60 = neg60.mean()
+                        avg120 = neg120.mean()
+                        lines.append(
+                            f"과거 {consecutive}일 이상 지속된 유사 에피소드 **{total_sim}건** 분석 결과, "
+                            f"종료 후 60일 내 지수 하락은 **{down60}/{len(neg60)}건** (평균 {avg60:+.1f}%), "
+                            f"120일 내 하락은 **{down120}/{len(neg120)}건** (평균 {avg120:+.1f}%)."
+                        )
+                        if avg60 < -3:
+                            lines.append("📌 **역사적으로 이 국면 이후 조정 압력이 우세했습니다.** 신규 비중 확대보다 기존 포지션 점검이 유효한 시기입니다.")
+                        elif avg60 > 3:
+                            lines.append("📌 **과거 유사 국면 이후 오히려 지수가 상승한 사례가 많습니다.** 대형주 주도 모멘텀이 이어질 가능성도 고려하세요.")
+                        else:
+                            lines.append("📌 **과거 유사 국면 이후 방향성이 혼재합니다.** 섣부른 방향 베팅보다 종목 선별에 집중하는 시기입니다.")
+                    else:
+                        lines.append("과거 데이터에서 유사 길이의 에피소드가 충분하지 않아 통계 산출이 어렵습니다.")
+
+                    st.error("\n\n".join(lines))
+
                 elif bull_now:
-                    st.success(f"✅ **강세 다이버전스 진행 중** — 지수 하락 + ADR 상승. "
-                               f"내부 강화 신호. 바닥 다지기 가능성.")
+                    finished_bull = df_bull_ep[df_bull_ep["종료"] != "진행중 🔴"]
+                    similar = finished_bull[finished_bull["지속(일)"] >= consecutive * 0.5] if not finished_bull.empty else pd.DataFrame()
+                    total_sim = len(similar)
+
+                    lines = [f"✅ **현재 연속 {consecutive}일째 강세 다이버전스 진행 중.**"]
+
+                    if total_sim > 0:
+                        pos60 = similar["+60일 수익률"].dropna()
+                        up60 = (pos60 > 0).sum()
+                        avg60 = pos60.mean()
+                        lines.append(
+                            f"과거 {consecutive}일 이상 지속된 유사 에피소드 **{total_sim}건** 분석 결과, "
+                            f"종료 후 60일 내 지수 상승은 **{up60}/{len(pos60)}건** (평균 {avg60:+.1f}%)."
+                        )
+                        if avg60 > 3:
+                            lines.append("📌 **역사적으로 이 국면 이후 지수 반등 가능성이 높았습니다.** 낙폭 과대 우량주 중심의 선별적 대응을 고려할 시기입니다.")
+                        else:
+                            lines.append("📌 **과거 유사 국면 이후 방향성이 혼재합니다.** 급반등 기대보다 분할 접근이 적합합니다.")
+                    else:
+                        lines.append("과거 데이터에서 유사 길이의 에피소드가 충분하지 않습니다.")
+
+                    st.success("\n\n".join(lines))
+
                 else:
-                    st.info("현재 뚜렷한 다이버전스 없음 (지수와 ADR 방향 일치)")
+                    last_bear_ep = df_bear_ep[df_bear_ep["종료"] != "진행중 🔴"]
+                    if not last_bear_ep.empty:
+                        last_end = last_bear_ep.iloc[-1]["종료"]
+                        st.info(f"현재 뚜렷한 다이버전스 없음 — 지수와 ADR이 동행 중. "
+                                f"직전 약세 다이버전스 에피소드는 {last_end} 종료.")
+                    else:
+                        st.info("현재 뚜렷한 다이버전스 없음 (지수와 ADR 방향 일치)")
 
                 bear_ep_count = df_div["bear_div"].sum()
                 bull_ep_count = df_div["bull_div"].sum()
