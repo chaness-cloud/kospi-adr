@@ -1018,6 +1018,7 @@ def calc_rebound_score(
     marcap_map: dict,
     periods: list[int],
     top_n: int = 50,
+    min_marcap_eok: float = 0,
 ) -> pd.DataFrame:
     """
     쏠림장 해소 시 반등 잠재력 스코어 (0~100).
@@ -1078,11 +1079,15 @@ def calc_rebound_score(
 
         # ④ 시총 (15pt): 로그 시총, 낮을수록 소형주
         marcap = marcap_map.get(ticker, 0)
+        marcap_eok = round(marcap / 1e8, 0) if marcap > 0 else 0  # 억원 단위
+        if min_marcap_eok > 0 and marcap_eok < min_marcap_eok:
+            continue
         log_cap = np.log1p(marcap) if marcap > 0 else 0
 
         rows.append({
             "종목코드": ticker,
             "업종": sec,
+            "시가총액(억)": int(marcap_eok),
             "현재가": int(cur),
             "MA이격(%)": round(avg_gap, 1),
             "RSI14": round(rsi_val, 1),
@@ -1539,9 +1544,14 @@ for tab, market in zip(tabs, markets):
                 "**MA 이격(40점) + RSI 과매도(25점) + 업종 약세도(20점) + 소형주 베타(15점)** 합산."
             )
 
-            rb1, rb2 = st.columns(2)
+            rb1, rb2, rb3 = st.columns(3)
             rb_top_n = rb1.slider("상위 종목 수", 20, 100, 50, step=10, key=f"rb_n_{market}")
             rb_periods_label = rb2.selectbox("기준 이평 (이격 계산)", periods, key=f"rb_p_{market}")
+            rb_min_marcap = rb3.number_input(
+                "최소 시가총액 (억원)", min_value=0, max_value=100000,
+                value=500, step=100, key=f"rb_marcap_{market}",
+                help="0이면 필터 없음. 예: 500 → 시총 500억 이상만 표시"
+            )
 
             st.info("⏳ 전 종목 RSI·이격·업종 점수 계산 중... (약 10~30초)")
 
@@ -1549,7 +1559,10 @@ for tab, market in zip(tabs, markets):
                 sector_map_rb = get_sector_map(market)
                 marcap_map = get_marcap_map(market)
                 names_rb = get_stock_names(market)
-                df_rb = calc_rebound_score(close, sector_map_rb, marcap_map, periods, top_n=rb_top_n)
+                df_rb = calc_rebound_score(
+                    close, sector_map_rb, marcap_map, periods,
+                    top_n=rb_top_n, min_marcap_eok=rb_min_marcap
+                )
 
             if df_rb.empty:
                 st.warning("계산 실패 또는 데이터 부족")
@@ -1585,6 +1598,7 @@ for tab, market in zip(tabs, markets):
                     column_config={
                         "반등잠재력": st.column_config.ProgressColumn(
                             "반등잠재력", min_value=0, max_value=100, format="%.0f점"),
+                        "시가총액(억)": st.column_config.NumberColumn(format="%d억"),
                         "MA이격(%)": st.column_config.NumberColumn(format="%.1f%%"),
                         "RSI14": st.column_config.NumberColumn(format="%.1f"),
                         "업종MA위비중(%)": st.column_config.NumberColumn(format="%.1f%%"),
