@@ -729,6 +729,88 @@ def calc_divergence(adr: pd.Series, index_s: pd.Series, window: int = 20) -> pd.
     return df
 
 
+def divergence_episodes(df_div: pd.DataFrame, index_s: pd.Series,
+                        div_type: str = "bear") -> pd.DataFrame:
+    """
+    베어/불리시 다이버전스 에피소드를 추출하고,
+    에피소드 종료 후 지수 수익률을 계산.
+    div_type: 'bear' or 'bull'
+    """
+    col = "bear_div" if div_type == "bear" else "bull_div"
+    signal = df_div[col].astype(int)
+
+    # 에피소드 시작/종료 감지
+    episodes = []
+    in_ep = False
+    start = None
+    for date, val in signal.items():
+        if val == 1 and not in_ep:
+            in_ep = True
+            start = date
+        elif val == 0 and in_ep:
+            in_ep = False
+            end = date
+            duration = (signal.loc[start:end] == 1).sum()
+            episodes.append({"시작": start, "종료": end, "지속(일)": duration})
+    # 현재 진행 중인 에피소드
+    if in_ep:
+        end = signal.index[-1]
+        duration = (signal.loc[start:] == 1).sum()
+        episodes.append({"시작": start, "종료": None, "지속(일)": int(duration), "_ongoing": True})
+
+    if not episodes:
+        return pd.DataFrame()
+
+    idx = index_s.reindex(df_div.index).ffill()
+    rows = []
+    for ep in episodes:
+        ep_end = ep["종료"] if ep["종료"] is not None else idx.index[-1]
+        base = idx.get(ep_end, np.nan)
+        r = {"시작": ep["시작"].strftime("%Y-%m-%d"),
+             "종료": ep["종료"].strftime("%Y-%m-%d") if ep["종료"] else "진행중 🔴",
+             "지속(일)": ep["지속(일)"]}
+        for fwd in [20, 60, 120]:
+            future_dates = idx.index[idx.index > ep_end]
+            if len(future_dates) >= fwd and not np.isnan(base) and base > 0:
+                fv = idx.iloc[idx.index.get_loc(ep_end) + fwd] if ep["종료"] else np.nan
+                r[f"+{fwd}일 수익률"] = round((fv / base - 1) * 100, 1) if not np.isnan(fv) else np.nan
+            else:
+                r[f"+{fwd}일 수익률"] = np.nan
+        rows.append(r)
+
+    return pd.DataFrame(rows)
+
+
+def divergence_signal_score(df_div: pd.DataFrame) -> dict:
+    """현재 다이버전스 신호 강도를 0~100점으로 환산."""
+    # 현재 베어리시 다이버전스 지속 일수
+    signal = df_div["bear_div"].astype(int)
+    consecutive = 0
+    for v in reversed(signal.values):
+        if v == 1:
+            consecutive += 1
+        else:
+            break
+
+    total_days = len(df_div)
+    bear_pct = df_div["bear_div"].mean() * 100  # 전체 기간 대비 베어 비율
+    latest = df_div.iloc[-1]
+    strength = abs(latest["idx_chg"] - latest["adr_chg"])  # 최근 강도
+
+    # 점수화
+    score_duration = min(consecutive / 60 * 40, 40)   # 60일 이상이면 만점
+    score_strength = min(strength / 30 * 30, 30)       # 30%p 이상이면 만점
+    score_freq = min(bear_pct / 30 * 30, 30)           # 30% 이상 빈도면 만점
+
+    total = round(score_duration + score_strength + score_freq, 1)
+    return {
+        "score": total,
+        "consecutive_days": consecutive,
+        "bear_pct": round(bear_pct, 1),
+        "strength": round(strength, 1),
+    }
+
+
 def build_divergence_chart(df: pd.DataFrame, market: str, period: int,
                            date_from: datetime, date_to: datetime) -> go.Figure:
     mask = (df.index >= pd.to_datetime(date_from)) & (df.index <= pd.to_datetime(date_to))
@@ -1438,24 +1520,79 @@ for tab, market in zip(tabs, markets):
                 col_b.metric(f"지수 {div_window}일 변화율", f"{latest_div['idx_chg']:+.1f}%")
                 col_c.metric(f"ADR {div_window}일 변화율", f"{latest_div['adr_chg']:+.1f}%")
 
+                # ── 신호 스코어카드 ──────────────────────────────────────────
+                sig = divergence_signal_score(df_div)
+                score = sig["score"]
+                if score >= 70:
+                    sig_color = "🔴"; sig_label = "위험 — 강한 쏠림 경고"
+                elif score >= 40:
+                    sig_color = "🟠"; sig_label = "주의 — 쏠림 진행 중"
+                elif score >= 20:
+                    sig_color = "🟡"; sig_label = "관찰 — 초기 신호"
+                else:
+                    sig_color = "🟢"; sig_label = "정상"
+
+                st.markdown(f"### {sig_color} 현재 약세 다이버전스 경보: **{score:.0f}점** / 100 — {sig_label}")
+                sc1, sc2, sc3 = st.columns(3)
+                sc1.metric("연속 베어 다이버전스", f"{sig['consecutive_days']}일",
+                           help="현재 기준 연속으로 약세 다이버전스가 감지된 거래일 수")
+                sc2.metric("전체 기간 내 빈도", f"{sig['bear_pct']:.1f}%",
+                           help="전체 분석 기간 중 약세 다이버전스가 발생한 날의 비율")
+                sc3.metric("최근 강도", f"{sig['strength']:.1f}%p",
+                           help="지수 변화율 - ADR 변화율. 클수록 지수와 ADR 괴리 심함")
+
                 if bear_now:
                     st.error(f"⚠️ **약세 다이버전스 진행 중** — 지수 상승 + ADR 하락. "
-                             f"내부 약화 신호. 소수 대형주가 지수를 끌어올리는 집중 장세.")
+                             f"소수 대형주가 지수를 끌어올리는 집중 장세. 내부 체력 약화.")
                 elif bull_now:
                     st.success(f"✅ **강세 다이버전스 진행 중** — 지수 하락 + ADR 상승. "
                                f"내부 강화 신호. 바닥 다지기 가능성.")
                 else:
                     st.info("현재 뚜렷한 다이버전스 없음 (지수와 ADR 방향 일치)")
 
-                # 역사적 약세 다이버전스 에피소드 수
-                bear_episodes = df_div["bear_div"].sum()
-                bull_episodes = df_div["bull_div"].sum()
-                st.caption(f"전체 기간 중 약세 다이버전스: {bear_episodes}일  |  강세 다이버전스: {bull_episodes}일")
+                bear_ep_count = df_div["bear_div"].sum()
+                bull_ep_count = df_div["bull_div"].sum()
+                st.caption(f"전체 기간 중 약세 다이버전스: {bear_ep_count}일  |  강세 다이버전스: {bull_ep_count}일")
 
                 st.plotly_chart(
                     build_divergence_chart(df_div, market, div_period, date_from, date_to),
                     use_container_width=True
                 )
+
+                # ── 에피소드 백테스트 ─────────────────────────────────────────
+                st.divider()
+                st.markdown("#### 📋 과거 다이버전스 에피소드 — 종료 후 지수 수익률")
+                ep_type = st.radio("에피소드 유형", ["약세 (베어리시)", "강세 (불리시)"],
+                                   horizontal=True, key=f"ep_type_{market}")
+                ep_key = "bear" if "약세" in ep_type else "bull"
+                df_ep = divergence_episodes(df_div, index_s, div_type=ep_key)
+
+                if df_ep.empty:
+                    st.info("에피소드 없음")
+                else:
+                    # 요약 통계
+                    fwd_cols = [c for c in df_ep.columns if "수익률" in c]
+                    finished = df_ep[df_ep["종료"] != "진행중 🔴"]
+                    if not finished.empty and fwd_cols:
+                        st.markdown("**과거 에피소드 종료 후 평균 수익률**")
+                        avg_row = {c: finished[c].mean() for c in fwd_cols}
+                        med_row = {c: finished[c].median() for c in fwd_cols}
+                        smr = pd.DataFrame([
+                            {"구분": "평균", **{c: f"{v:+.1f}%" for c, v in avg_row.items()}},
+                            {"구분": "중앙값", **{c: f"{v:+.1f}%" for c, v in med_row.items()}},
+                        ])
+                        st.dataframe(smr, use_container_width=True, hide_index=True)
+
+                    st.markdown("**전체 에피소드 목록**")
+                    st.dataframe(
+                        df_ep,
+                        use_container_width=True, hide_index=True,
+                        column_config={
+                            "+20일 수익률": st.column_config.NumberColumn(format="%.1f%%"),
+                            "+60일 수익률": st.column_config.NumberColumn(format="%.1f%%"),
+                            "+120일 수익률": st.column_config.NumberColumn(format="%.1f%%"),
+                        }
+                    )
 
         # ── ⑥ 종목 스크리너 ──────────────────────────────────────────────────
         with tab_screen:
