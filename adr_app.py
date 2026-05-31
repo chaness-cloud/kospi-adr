@@ -1559,6 +1559,22 @@ def add_naver_link(df: pd.DataFrame, code_col: str = "종목코드") -> pd.DataF
     return df
 
 
+@st.cache_data(show_spinner=False, ttl=3600)
+def _load_etf_cached(today_key: str):
+    """ETF 데이터 로드 — 당일 캐시 재사용 (탭 밖에서 정의해야 cache_data 정상 작동)."""
+    if not ETF_AVAILABLE:
+        return None, pd.DataFrame()
+    _etf_cache_file = os.path.join(ETF_FLOW_DIR, "etf_cache.pkl")
+    if os.path.exists(_etf_cache_file):
+        with open(_etf_cache_file, "rb") as f:
+            cached = pickle.load(f)
+        if cached.get("fetch_date", "") == today_key:
+            return cached.get("raw_df"), cached.get("meta_df", pd.DataFrame())
+    raw_df, meta_df = build_flow_dataset(n_days=20)
+    save_marcap_snapshot(meta_df)
+    return raw_df, meta_df
+
+
 # ── UI ───────────────────────────────────────────────────────────────────────
 st.title("📈 KOSPI / KOSDAQ ADR 분석")
 st.caption(f"ADR = 이동평균선 위 종목 수 ÷ 이동평균선 아래 종목 수  |  기준: 최근 {YEARS}년")
@@ -2246,23 +2262,8 @@ for tab, market in zip(tabs, markets):
                     "이 탭은 로컬 전용 기능입니다."
                 )
             else:
-                etf_cache_file = os.path.join(ETF_FLOW_DIR, "etf_cache.pkl")
-
-                @st.cache_data(show_spinner=False, ttl=3600)
-                def _load_etf_data(today_key: str):
-                    import pickle as _pkl
-                    # 기존 ETF 캐시 재사용
-                    if os.path.exists(etf_cache_file):
-                        with open(etf_cache_file, "rb") as f:
-                            cached = _pkl.load(f)
-                        if cached.get("fetch_date", "") == today_key:
-                            return cached.get("raw_df"), cached.get("meta_df", pd.DataFrame())
-                    raw_df, meta_df = build_flow_dataset(n_days=20)
-                    save_marcap_snapshot(meta_df)
-                    return raw_df, meta_df
-
                 with st.spinner("ETF 데이터 로드 중..."):
-                    etf_raw, etf_meta = _load_etf_data(datetime.today().strftime("%Y%m%d"))
+                    etf_raw, etf_meta = _load_etf_cached(_today())
 
                 if etf_raw is None or etf_raw.empty:
                     st.error("ETF 데이터 로드 실패")
