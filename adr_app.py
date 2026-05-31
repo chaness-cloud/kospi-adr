@@ -704,9 +704,15 @@ def build_episode_chart(episodes: list, adr: pd.Series, index_s: pd.Series,
 # ── 다이버전스 분석 ───────────────────────────────────────────────────────────
 def calc_divergence(adr: pd.Series, index_s: pd.Series, window: int = 20) -> pd.DataFrame:
     """
-    롤링 window 기간 동안 지수 방향 vs ADR 방향 비교.
-    - 강세 다이버전스: 지수 하락 + ADR 상승 (바닥 신호)
-    - 약세 다이버전스: 지수 상승 + ADR 하락 (고점 경고)
+    약세/강세 다이버전스 판정.
+
+    bear_div (약세·쏠림):
+      ADR 백분위 하위 35% 이하  AND  지수 window일 변화율 양수
+      → 쏠림이 오래 지속돼 ADR 변화율이 작아도 올바르게 카운트
+
+    bull_div (강세·전환):
+      ADR 백분위 상위 65% 이상  AND  지수 window일 변화율 음수
+      OR  기존 방식(지수↓ + ADR↑10%) 보조 판정
     """
     common = adr.dropna().index.intersection(index_s.dropna().index)
     s = adr.loc[common]
@@ -715,12 +721,20 @@ def calc_divergence(adr: pd.Series, index_s: pd.Series, window: int = 20) -> pd.
     idx_chg = idx.pct_change(window)
     adr_chg = s.pct_change(window)
 
-    bear_div = (idx_chg > 0) & (adr_chg < -0.10)   # 지수↑ ADR↓10%+ : 약세다이버전스
-    bull_div = (idx_chg < 0) & (adr_chg > 0.10)    # 지수↓ ADR↑10%+ : 강세다이버전스
+    # 롤링 ADR 백분위 (252일 기준)
+    adr_pct = s.rolling(252, min_periods=60).rank(pct=True) * 100
+
+    # 약세 다이버전스: ADR 하위 35% 이하 + 지수 상승
+    bear_div = (adr_pct <= 35) & (idx_chg > 0)
+
+    # 강세 다이버전스: ADR 상위 65% 이상 + 지수 하락  OR  기존 방식
+    bull_div = ((adr_pct >= 65) & (idx_chg < 0)) | \
+               ((idx_chg < 0) & (adr_chg > 0.10))
 
     df = pd.DataFrame({
         "index": idx,
         "adr": s,
+        "adr_pct": adr_pct,
         "idx_chg": idx_chg * 100,
         "adr_chg": adr_chg * 100,
         "bear_div": bear_div,
