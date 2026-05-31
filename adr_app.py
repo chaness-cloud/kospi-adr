@@ -870,7 +870,7 @@ def calc_prob_timeseries(adr: pd.Series, index_s: pd.Series,
             a_j = adr_mom.iloc[j]
             x_j = idx_mom.iloc[j]
             b_j = x_j > 0 and a_j < 0
-            if abs(p_j - pct_i) > 15 or b_j != b_type_i:
+            if abs(p_j - pct_i) > 20 or b_j != b_type_i:  # 완화: ±15 → ±20
                 continue
             if (a_j < 0) != (adr_m < 0):
                 continue
@@ -879,7 +879,7 @@ def calc_prob_timeseries(adr: pd.Series, index_s: pd.Series,
             cont += (future < cur_j)
             cnt += 1
 
-        if cnt >= 3:
+        if cnt >= 1:
             probs.append(cont / cnt * 100)
         else:
             probs.append(np.nan)
@@ -1861,7 +1861,7 @@ for tab, market in zip(tabs, markets):
                 # ── 확률 시계열 차트 (백테스트) ───────────────────────────────
                 st.divider()
                 st.markdown("#### 📈 쏠림 심화 확률 시계열 — 자체 백테스트")
-                st.caption("매 시점의 '쏠림 심화 확률'을 과거로 소급해 계산. 확률이 높았던 구간 이후 지수가 실제로 어떻게 됐는지 육안으로 확인 가능.")
+                st.caption("매 시점의 '쏠림 심화 확률'을 과거로 소급해 계산. **빨간 선** = 쏠림 심화 확률(%). **빨간 음영** = 70% 이상 경보 구간. 최근 20거래일은 미래 데이터 필요로 계산 불가 → 별도 마커로 표시.")
                 with st.spinner("확률 시계열 계산 중 (수초 소요)..."):
                     prob_ts = calc_prob_timeseries(adr_all[div_period], index_s, horizon=20)
 
@@ -1886,11 +1886,39 @@ for tab, market in zip(tabs, markets):
                                                   line=dict(color="rgba(0,0,0,0)")),
                                       row=2, col=1)
                     fig_pts.add_hline(y=70, line_dash="dash", line_color="red",
-                                      line_width=0.8, row=2, col=1)
+                                      line_width=0.8, row=2, col=1,
+                                      annotation_text="경보 70%", annotation_position="right")
                     fig_pts.add_hline(y=50, line_dash="dot", line_color="gray",
-                                      line_width=0.8, row=2, col=1)
-                    fig_pts.update_layout(height=450, showlegend=False,
-                                          margin=dict(l=40, r=40, t=40, b=20))
+                                      line_width=0.8, row=2, col=1,
+                                      annotation_text="중립 50%", annotation_position="right")
+                    # 현재 시점 마커 (계산 가능한 마지막 값)
+                    last_valid = prob_ts.dropna()
+                    if not last_valid.empty:
+                        cur_prob_val = last_valid.iloc[-1]
+                        cur_prob_date = last_valid.index[-1]
+                        fig_pts.add_trace(go.Scatter(
+                            x=[cur_prob_date], y=[cur_prob_val],
+                            mode="markers+text",
+                            marker=dict(color="#F44336", size=10, symbol="star"),
+                            text=[f"최근값 {cur_prob_val:.0f}%"],
+                            textposition="top left",
+                            name="최근 계산값",
+                        ), row=2, col=1)
+                        # 현재까지 점선 연장
+                        today_date = index_s.index[-1]
+                        fig_pts.add_shape(type="line",
+                            x0=cur_prob_date, x1=today_date,
+                            y0=cur_prob_val, y1=cur_prob_val,
+                            line=dict(dash="dot", color="#F44336", width=1),
+                            row=2, col=1)
+                        fig_pts.add_annotation(
+                            x=today_date, y=cur_prob_val,
+                            text=f"← 현재 ({cur_prob_val:.0f}%)",
+                            showarrow=False, font=dict(color="#F44336", size=9),
+                            xanchor="right", row=2, col=1,
+                        )
+                    fig_pts.update_layout(height=480, showlegend=False,
+                                          margin=dict(l=40, r=80, t=40, b=20))
                     st.plotly_chart(fig_pts, use_container_width=True)
 
                 # ── 다이버전스 차트 ───────────────────────────────────────────
