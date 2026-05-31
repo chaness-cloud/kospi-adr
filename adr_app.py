@@ -19,6 +19,38 @@ import FinanceDataReader as fdr
 
 warnings.filterwarnings("ignore")
 
+# ── ETF 모듈 (로컬 전용) ─────────────────────────────────────────────────────
+ETF_FLOW_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "etf_flow")
+ETF_AVAILABLE = False
+if os.path.exists(ETF_FLOW_DIR):
+    sys.path.insert(0, ETF_FLOW_DIR)
+    try:
+        from etf_data import (
+            build_flow_dataset, compute_flow_stats,
+            compute_theme_stats, compute_theme_net_inflow,
+            save_marcap_snapshot,
+        )
+        ETF_AVAILABLE = True
+    except Exception:
+        ETF_AVAILABLE = False
+
+# ADR 섹터 ↔ ETF 테마 매핑
+SECTOR_TO_ETF_THEME = {
+    "전기전자": "반도체·AI",
+    "바이오·의약": "바이오·헬스",
+    "화학": "인프라·산업재",
+    "철강·금속": "인프라·산업재",
+    "기계·장비": "인프라·산업재",
+    "자동차": "자동차·로봇",
+    "건설·건재": "인프라·산업재",
+    "금융·보험": "금융·리츠",
+    "에너지": "에너지·원자력",
+    "유통·소비": "소비·엔터",
+    "미디어·통신": "소비·엔터",
+    "운수·물류": "인프라·산업재",
+    "서비스·기타": "기타",
+}
+
 # ── 페이지 설정 ─────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="KOSPI / KOSDAQ ADR 분석",
@@ -1622,7 +1654,7 @@ for tab, market in zip(tabs, markets):
                 )
 
         # ── 서브탭 ────────────────────────────────────────────────────────────
-        tab_chart, tab_stat, tab_bt, tab_sector, tab_div, tab_screen, tab_recover, tab_rebound = st.tabs([
+        tab_chart, tab_stat, tab_bt, tab_sector, tab_div, tab_screen, tab_recover, tab_rebound, tab_etf = st.tabs([
             "📊 ADR 차트",
             "🔔 통계 분포",
             "📈 백테스트",
@@ -1631,6 +1663,7 @@ for tab, market in zip(tabs, markets):
             "🔍 종목 스크리너",
             "🔮 회복 시점 예측",
             "🚀 반등 잠재력",
+            "💰 ETF 섹터 신호",
         ])
 
         # ── ① ADR 차트 ───────────────────────────────────────────────────────
@@ -2197,3 +2230,158 @@ for tab, market in zip(tabs, markets):
                     plot_bgcolor="white", paper_bgcolor="white",
                 )
                 st.plotly_chart(fig_sec_rb, use_container_width=True)
+
+        # ── ⑨ ETF 섹터 신호 ──────────────────────────────────────────────────
+        with tab_etf:
+            st.markdown("#### 💰 ETF 자금 흐름 × 섹터 ADR — 전환 조기 신호")
+            st.caption(
+                "섹터 ADR(내부 체력)과 ETF 거래대금 모멘텀(실제 수급)을 결합합니다. "
+                "**ADR 바닥권 + ETF 자금 유입 시작** = 가장 강한 전환 선행 신호."
+            )
+
+            if not ETF_AVAILABLE:
+                st.warning(
+                    "ETF 모듈을 찾을 수 없습니다. "
+                    "`C:/Users/user/etf_flow/etf_data.py` 경로를 확인하세요. "
+                    "이 탭은 로컬 전용 기능입니다."
+                )
+            else:
+                etf_cache_file = os.path.join(ETF_FLOW_DIR, "etf_cache.pkl")
+
+                @st.cache_data(show_spinner=False, ttl=3600)
+                def _load_etf_data(today_key: str):
+                    import pickle as _pkl
+                    # 기존 ETF 캐시 재사용
+                    if os.path.exists(etf_cache_file):
+                        with open(etf_cache_file, "rb") as f:
+                            cached = _pkl.load(f)
+                        if cached.get("fetch_date", "") == today_key:
+                            return cached.get("raw_df"), cached.get("meta_df", pd.DataFrame())
+                    raw_df, meta_df = build_flow_dataset(n_days=20)
+                    save_marcap_snapshot(meta_df)
+                    return raw_df, meta_df
+
+                with st.spinner("ETF 데이터 로드 중..."):
+                    etf_raw, etf_meta = _load_etf_data(datetime.today().strftime("%Y%m%d"))
+
+                if etf_raw is None or etf_raw.empty:
+                    st.error("ETF 데이터 로드 실패")
+                else:
+                    flow_df = compute_flow_stats(etf_raw)
+                    theme_df = compute_theme_stats(flow_df)
+
+                    # ── 섹터 ADR 계산 (현재 탭 market 기준) ──────────────────
+                    _sec_map_etf = get_sector_map(market)
+                    ref_p_etf = periods[1] if len(periods) > 1 else periods[0]
+                    _latest = close.index[-1]
+                    _row = close.loc[_latest]
+                    _ma = close.rolling(ref_p_etf, min_periods=ref_p_etf).mean().loc[_latest]
+
+                    sec_adr_now = {}
+                    for sec in set(_sec_map_etf.values()):
+                        tks = [t for t in close.columns if _sec_map_etf.get(t) == sec]
+                        r = _row[tks].dropna(); m = _ma[tks].dropna()
+                        cmn = r.index.intersection(m.index)
+                        if len(cmn) >= 3:
+                            sec_adr_now[sec] = (r[cmn] > m[cmn]).mean() * 100
+
+                    # ── 섹터↔ETF 테마 결합 ────────────────────────────────────
+                    rows_etf = []
+                    for sec, adr_pct in sec_adr_now.items():
+                        etf_theme = SECTOR_TO_ETF_THEME.get(sec)
+                        if not etf_theme:
+                            continue
+                        t_row = theme_df[theme_df["theme"] == etf_theme]
+                        if t_row.empty:
+                            continue
+                        t = t_row.iloc[0]
+                        vol_mom = float(t.get("avg_vol_momentum", 0))
+                        chg_5d = float(t.get("avg_change_5d", 0))
+
+                        # 신호 판정
+                        if adr_pct <= 30 and vol_mom > 10:
+                            signal = "🟢 전환 조기 신호"
+                            signal_score = 90
+                        elif adr_pct <= 30 and vol_mom > 0:
+                            signal = "🟡 전환 관찰"
+                            signal_score = 60
+                        elif adr_pct <= 30 and vol_mom <= 0:
+                            signal = "🔴 바닥권 / 아직 수급 없음"
+                            signal_score = 20
+                        elif adr_pct >= 65 and vol_mom < -10:
+                            signal = "⚠️ 쏠림 피크 주의"
+                            signal_score = 70
+                        elif adr_pct >= 65 and vol_mom > 10:
+                            signal = "🔥 쏠림 지속 강세"
+                            signal_score = 80
+                        else:
+                            signal = "⚪ 중립"
+                            signal_score = 40
+
+                        rows_etf.append({
+                            "ADR섹터": sec,
+                            "ETF테마": etf_theme,
+                            "섹터ADR(%)": round(adr_pct, 1),
+                            "ETF거래대금모멘텀(%)": round(vol_mom, 1),
+                            "ETF5일수익률(%)": round(chg_5d, 1),
+                            "신호": signal,
+                            "_score": signal_score,
+                        })
+
+                    if not rows_etf:
+                        st.info("결합 가능한 섹터 데이터 없음")
+                    else:
+                        df_etf_sig = pd.DataFrame(rows_etf).sort_values("_score", ascending=False)
+                        df_etf_sig = df_etf_sig.drop(columns=["_score"])
+
+                        # 전환 조기 신호 하이라이트
+                        turning = df_etf_sig[df_etf_sig["신호"].str.contains("전환 조기")]
+                        if not turning.empty:
+                            st.success(f"🟢 **전환 조기 신호 섹터 {len(turning)}개 감지!**")
+                            for _, r in turning.iterrows():
+                                st.markdown(
+                                    f"- **{r['ADR섹터']}** — 섹터ADR {r['섹터ADR(%)']:.0f}% (바닥권) + "
+                                    f"ETF 거래대금 모멘텀 **+{r['ETF거래대금모멘텀(%)']:.0f}%** (자금 유입 시작)"
+                                )
+                        else:
+                            st.info("현재 전환 조기 신호 없음 — 바닥권 섹터에 ETF 자금이 아직 유입되지 않음")
+
+                        st.divider()
+                        st.markdown("##### 전체 섹터 × ETF 신호 테이블")
+                        st.dataframe(
+                            df_etf_sig,
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "섹터ADR(%)": st.column_config.ProgressColumn(
+                                    "섹터ADR(%)", min_value=0, max_value=100, format="%.1f",
+                                    help="ADR 섹터 내 MA 위 종목 비중. 낮을수록 해당 업종이 과매도 상태."),
+                                "ETF거래대금모멘텀(%)": st.column_config.NumberColumn(
+                                    format="%.1f%%",
+                                    help="최근 5일 평균 거래대금 vs 직전 20일 평균. 양수=자금 유입 증가, 음수=감소."),
+                                "ETF5일수익률(%)": st.column_config.NumberColumn(format="%.1f%%"),
+                            }
+                        )
+
+                        # ETF 테마별 거래대금 모멘텀 차트
+                        st.markdown("##### ETF 테마별 거래대금 모멘텀")
+                        df_mom = df_etf_sig.sort_values("ETF거래대금모멘텀(%)", ascending=True)
+                        colors = ["#4CAF50" if v > 0 else "#F44336"
+                                  for v in df_mom["ETF거래대금모멘텀(%)"]]
+                        fig_etf = go.Figure(go.Bar(
+                            x=df_mom["ETF거래대금모멘텀(%)"],
+                            y=df_mom["ADR섹터"],
+                            orientation="h",
+                            marker_color=colors,
+                            text=df_mom["ETF거래대금모멘텀(%)"].apply(lambda v: f"{v:+.1f}%"),
+                            textposition="outside",
+                        ))
+                        fig_etf.update_layout(
+                            title="섹터별 ETF 거래대금 모멘텀 (최근 5일 vs 직전 20일)",
+                            xaxis_title="모멘텀 (%)",
+                            height=max(300, len(df_mom) * 32 + 80),
+                            margin=dict(l=120, r=80, t=50, b=30),
+                            plot_bgcolor="white", paper_bgcolor="white",
+                        )
+                        fig_etf.add_vline(x=0, line_color="gray", line_width=1)
+                        st.plotly_chart(fig_etf, use_container_width=True)
