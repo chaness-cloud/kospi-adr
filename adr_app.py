@@ -2354,17 +2354,46 @@ for tab, market in zip(tabs, markets):
 
                         # ── ETF별 신호 스코어 (1회만 계산) ───────────────────
                         flow_df = flow_df.copy()
-                        flow_df["etf_signal_score"] = (
-                            flow_df["vol_momentum"].clip(-50, 100) * 0.5 +
-                            flow_df["vol_streak"] * 5 +
-                            flow_df["change_5d"].clip(-20, 20) * 0.3
-                        )
+
+                        # AUM 스냅샷 충분하면 순유입 반영, 아니면 OBV proxy
+                        _snap_days = 0
+                        try:
+                            from etf_data import load_marcap_history as _lmh
+                            _snap_days = len(_lmh())
+                        except Exception:
+                            pass
+
+                        if "buy_ratio_5d" not in flow_df.columns:
+                            flow_df["buy_ratio_5d"] = 50.0
+                        if "net_inflow_pct" not in flow_df.columns:
+                            flow_df["net_inflow_pct"] = 0.0
+
+                        if _snap_days >= 5:
+                            # AUM 순유입 데이터 충분 → 순유입 비중 높임
+                            flow_df["etf_signal_score"] = (
+                                flow_df["net_inflow_pct"].clip(-5, 5) * 6 +        # 순유입 (40pt)
+                                (flow_df["buy_ratio_5d"] - 50).clip(-30, 30) * 0.8 + # OBV (24pt)
+                                flow_df["change_5d"].clip(-10, 10) * 2 +           # 5일수익률 (20pt)
+                                flow_df["vol_streak"] * 4                          # 연속증가일 (16pt)
+                            )
+                            score_method = f"순유입({_snap_days}일 스냅샷) + OBV + 수익률"
+                        else:
+                            # 스냅샷 부족 → OBV proxy 중심
+                            flow_df["etf_signal_score"] = (
+                                (flow_df["buy_ratio_5d"] - 50).clip(-30, 30) * 1.2 + # OBV (36pt)
+                                flow_df["change_5d"].clip(-10, 10) * 3 +             # 5일수익률 (30pt)
+                                flow_df["vol_streak"] * 5 +                          # 연속증가일 (25pt)
+                                flow_df["vol_momentum"].clip(-20, 20) * 0.45         # 보조 (9pt)
+                            )
+                            score_method = f"OBV proxy (AUM 스냅샷 {_snap_days}일 — 5일 이상 쌓이면 순유입 반영)"
+
+                        st.caption(f"📊 신호 산출 방식: {score_method}")
 
                         etf_col_cfg = {
                             "차트": st.column_config.LinkColumn("차트", display_text="📈"),
                             "신호강도": st.column_config.ProgressColumn(
                                 "신호강도", min_value=-50, max_value=100, format="%.1f",
-                                help="거래대금모멘텀×0.5 + 연속증가일×5 + 5일수익률×0.3"),
+                                help="AUM 순유입(가격효과 제거) + OBV(상승일 거래대금 비율) + 5일수익률 + 연속증가일 종합. 스냅샷 5일 이상 쌓이면 순유입 비중 높아짐."),
                             "거래대금모멘텀(%)": st.column_config.NumberColumn(format="%.1f%%"),
                             "5일수익률(%)": st.column_config.NumberColumn(format="%.1f%%"),
                             "당일수익률(%)": st.column_config.NumberColumn(format="%.2f%%"),
