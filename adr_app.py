@@ -1187,6 +1187,17 @@ def snapshot_table(close: pd.DataFrame, periods: list[int]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def add_naver_link(df: pd.DataFrame, code_col: str = "종목코드") -> pd.DataFrame:
+    """종목코드 컬럼 앞에 네이버 금융 링크 컬럼을 추가."""
+    df = df.copy()
+    df.insert(
+        df.columns.get_loc(code_col),
+        "차트",
+        df[code_col].apply(lambda c: f"https://finance.naver.com/item/main.naver?code={c}")
+    )
+    return df
+
+
 # ── UI ───────────────────────────────────────────────────────────────────────
 st.title("📈 KOSPI / KOSDAQ ADR 분석")
 st.caption(f"ADR = 이동평균선 위 종목 수 ÷ 이동평균선 아래 종목 수  |  기준: 최근 {YEARS}년")
@@ -1477,10 +1488,12 @@ for tab, market in zip(tabs, markets):
                 st.info("해당 조건에 맞는 종목이 없습니다.")
             else:
                 st.markdown(f"**{len(df_screen)}개 종목** 해당")
+                df_screen_linked = add_naver_link(df_screen)
                 st.dataframe(
-                    df_screen,
+                    df_screen_linked,
                     use_container_width=True, hide_index=True,
                     column_config={
+                        "차트": st.column_config.LinkColumn("차트", display_text="📈"),
                         "MA대비(%)": st.column_config.NumberColumn(format="%.1f%%"),
                         "현재가": st.column_config.NumberColumn(format="%d"),
                     }
@@ -1591,11 +1604,12 @@ for tab, market in zip(tabs, markets):
 
                 # 전체 테이블
                 st.markdown("##### 전체 반등 후보 목록")
-                st.caption("종목코드 클릭 → 네이버 금융 연결은 브라우저에서 직접 검색하세요.")
+                df_rb_linked = add_naver_link(df_rb)
                 st.dataframe(
-                    df_rb,
+                    df_rb_linked,
                     use_container_width=True,
                     column_config={
+                        "차트": st.column_config.LinkColumn("차트", display_text="📈"),
                         "반등잠재력": st.column_config.ProgressColumn(
                             "반등잠재력", min_value=0, max_value=100, format="%.0f점"),
                         "시가총액(억)": st.column_config.NumberColumn(format="%d억"),
