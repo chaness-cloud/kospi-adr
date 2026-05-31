@@ -732,18 +732,30 @@ def calc_divergence(adr: pd.Series, index_s: pd.Series, window: int = 20) -> pd.
 def classify_ab_type(adr: pd.Series, index_s: pd.Series, window: int = 60) -> str:
     """
     현재 쏠림 유형 판정.
-    A타입: 지수도 같이 하락 중 (전체 하락장 중 ADR 하락)
-    B타입: 지수는 상승인데 ADR만 하락 (쏠림장, 현재)
+    - ADR 백분위(절대 레벨)가 낮은지 + 지수 방향으로 판정
+    A타입: ADR 하위 30% 이하 + 지수도 하락 (전체 하락장)
+    B타입: ADR 하위 30% 이하 + 지수는 상승 (쏠림장)
+    중립: ADR이 정상 범위
     """
     common = adr.dropna().index.intersection(index_s.dropna().index)
-    if len(common) < window:
+    if len(common) < 120:
         return "알 수 없음"
-    idx_chg = index_s.loc[common].pct_change(window).iloc[-1]
-    adr_chg = adr.loc[common].pct_change(window).iloc[-1]
-    if idx_chg > 0.02 and adr_chg < -0.05:
-        return "B"   # 지수↑ ADR↓ = 쏠림형
-    elif idx_chg < -0.02 and adr_chg < -0.05:
-        return "A"   # 지수↓ ADR↓ = 전체하락형
+    s = adr.loc[common]
+    idx = index_s.loc[common]
+
+    # ADR 현재 백분위 (전체 기간 기준)
+    adr_pct = (s < s.iloc[-1]).mean() * 100   # 낮을수록 현재가 역대 하위
+
+    # 지수 방향: 20일 + 60일 변화율 평균으로 판단
+    idx_chg_20 = idx.pct_change(20).iloc[-1]
+    idx_chg_60 = idx.pct_change(60).iloc[-1]
+    idx_trending_up = (idx_chg_20 + idx_chg_60) / 2 > 0
+
+    if adr_pct <= 30:          # ADR이 역대 하위 30% = 약세 심화
+        if idx_trending_up:
+            return "B"         # 지수↑ ADR↓ = 쏠림장
+        else:
+            return "A"         # 지수↓ ADR↓ = 전체하락장
     else:
         return "중립"
 
