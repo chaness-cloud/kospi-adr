@@ -1570,7 +1570,7 @@ def _load_etf_cached(today_key: str):
             cached = pickle.load(f)
         if cached.get("fetch_date", "") == today_key:
             return cached.get("raw_df"), cached.get("meta_df", pd.DataFrame())
-    raw_df, meta_df = build_flow_dataset(n_days=20)
+    raw_df, meta_df = build_flow_dataset(n_days=30)
     save_marcap_snapshot(meta_df)
     return raw_df, meta_df
 
