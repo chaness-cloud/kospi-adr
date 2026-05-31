@@ -757,18 +757,18 @@ def build_divergence_chart(df: pd.DataFrame, market: str, period: int,
     fig.add_hline(y=1.0, line_dash="dash", line_color="gray",
                   line_width=0.8, row=2, col=1)
 
-    # 다이버전스 강도: idx_chg - adr_chg (양수=약세다이버전스)
+    # 다이버전스 강도: 확정된 날에만 표시
     div_strength = d["idx_chg"] - d["adr_chg"]
-    pos = div_strength.clip(lower=0)
-    neg = div_strength.clip(upper=0)
+    bear_strength = div_strength.where(d["bear_div"], 0)
+    bull_strength = (-div_strength).where(d["bull_div"], 0)  # 양수로 표시
 
-    fig.add_trace(go.Bar(x=d.index, y=pos.values, name="약세 다이버전스",
-                         marker_color="rgba(244,67,54,0.6)",
-                         hovertemplate="%{x|%Y-%m-%d}<br>강도: %{y:.1f}%p<extra></extra>"),
+    fig.add_trace(go.Bar(x=d.index, y=bear_strength.values, name="약세 다이버전스",
+                         marker_color="rgba(244,67,54,0.7)",
+                         hovertemplate="%{x|%Y-%m-%d}<br>약세강도: %{y:.1f}%p<extra></extra>"),
                   row=3, col=1)
-    fig.add_trace(go.Bar(x=d.index, y=neg.values, name="강세 다이버전스",
-                         marker_color="rgba(33,150,243,0.6)",
-                         hovertemplate="%{x|%Y-%m-%d}<br>강도: %{y:.1f}%p<extra></extra>"),
+    fig.add_trace(go.Bar(x=d.index, y=bull_strength.values, name="강세 다이버전스",
+                         marker_color="rgba(33,150,243,0.7)",
+                         hovertemplate="%{x|%Y-%m-%d}<br>강세강도: %{y:.1f}%p<extra></extra>"),
                   row=3, col=1)
 
     # 현재 상황 강조
