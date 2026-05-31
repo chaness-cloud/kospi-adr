@@ -2348,7 +2348,81 @@ for tab, market in zip(tabs, markets):
                             st.info("현재 전환 조기 신호 없음 — 바닥권 섹터에 ETF 자금이 아직 유입되지 않음")
 
                         st.divider()
-                        st.markdown("##### 전체 섹터 × ETF 신호 테이블")
+
+                        # ── 개별 ETF 드릴다운 ─────────────────────────────────
+                        st.markdown("##### 📋 개별 ETF 상세 — 신호 강도 순")
+
+                        # ETF별 신호 스코어 계산
+                        flow_df["etf_signal_score"] = (
+                            flow_df["vol_momentum"].clip(-50, 100) * 0.5 +
+                            flow_df["vol_streak"] * 5 +
+                            flow_df["change_5d"].clip(-20, 20) * 0.3
+                        )
+
+                        # 뷰 모드 선택
+                        view_mode = st.radio(
+                            "보기 기준",
+                            ["ADR 섹터별", "ETF 테마별", "전체 신호 Top 30"],
+                            horizontal=True,
+                            key=f"etf_view_{market}"
+                        )
+
+                        def make_etf_df(etf_subset: pd.DataFrame) -> pd.DataFrame:
+                            df = etf_subset.sort_values("etf_signal_score", ascending=False).copy()
+                            df = df.rename(columns={
+                                "name": "ETF명",
+                                "ticker": "티커",
+                                "theme": "테마",
+                                "vol_momentum": "거래대금모멘텀(%)",
+                                "vol_streak": "연속증가일",
+                                "change_5d": "5일수익률(%)",
+                                "change_today": "당일수익률(%)",
+                                "etf_signal_score": "신호강도",
+                            })
+                            cols = ["ETF명", "티커", "테마", "신호강도",
+                                    "거래대금모멘텀(%)", "연속증가일", "5일수익률(%)", "당일수익률(%)"]
+                            return df[[c for c in cols if c in df.columns]].reset_index(drop=True)
+
+                        etf_col_cfg = {
+                            "신호강도": st.column_config.ProgressColumn(
+                                "신호강도", min_value=-50, max_value=100, format="%.1f",
+                                help="거래대금모멘텀×0.5 + 연속증가일×5 + 5일수익률×0.3. 높을수록 수급 신호 강함."),
+                            "거래대금모멘텀(%)": st.column_config.NumberColumn(format="%.1f%%",
+                                help="최근 5일 평균 거래대금 vs 직전 20일 평균. 양수=자금 유입 증가."),
+                            "5일수익률(%)": st.column_config.NumberColumn(format="%.1f%%"),
+                            "당일수익률(%)": st.column_config.NumberColumn(format="%.2f%%"),
+                            "연속증가일": st.column_config.NumberColumn(format="%d일"),
+                        }
+
+                        if view_mode == "ADR 섹터별":
+                            # ADR 섹터 선택
+                            adr_sectors_avail = sorted(df_etf_sig["ADR섹터"].unique())
+                            sel_sec = st.selectbox("ADR 섹터 선택", adr_sectors_avail,
+                                                    key=f"etf_sec_{market}")
+                            etf_theme_for_sec = SECTOR_TO_ETF_THEME.get(sel_sec, "기타")
+                            etf_subset = flow_df[flow_df["theme"] == etf_theme_for_sec]
+                            st.caption(f"**{sel_sec}** 섹터 → ETF 테마: **{etf_theme_for_sec}** ({len(etf_subset)}개 ETF)")
+                            st.dataframe(make_etf_df(etf_subset), use_container_width=True,
+                                         hide_index=True, column_config=etf_col_cfg)
+
+                        elif view_mode == "ETF 테마별":
+                            all_themes = sorted(flow_df["theme"].dropna().unique())
+                            sel_theme = st.selectbox("ETF 테마 선택", all_themes,
+                                                      key=f"etf_theme_{market}")
+                            etf_subset = flow_df[flow_df["theme"] == sel_theme]
+                            st.caption(f"**{sel_theme}** 테마 ETF {len(etf_subset)}개")
+                            st.dataframe(make_etf_df(etf_subset), use_container_width=True,
+                                         hide_index=True, column_config=etf_col_cfg)
+
+                        else:  # 전체 Top 30
+                            top30 = flow_df.nlargest(30, "etf_signal_score")
+                            st.caption("전체 ETF 중 신호강도 상위 30개 (레버리지·인버스 포함)")
+                            st.dataframe(make_etf_df(top30), use_container_width=True,
+                                         hide_index=True, column_config=etf_col_cfg)
+
+                        st.divider()
+                        # ── 섹터 요약 테이블 + 차트 ───────────────────────────
+                        st.markdown("##### 전체 섹터 × ETF 신호 요약")
                         st.dataframe(
                             df_etf_sig,
                             use_container_width=True,
@@ -2364,16 +2438,15 @@ for tab, market in zip(tabs, markets):
                             }
                         )
 
-                        # ETF 테마별 거래대금 모멘텀 차트
-                        st.markdown("##### ETF 테마별 거래대금 모멘텀")
+                        # 차트
                         df_mom = df_etf_sig.sort_values("ETF거래대금모멘텀(%)", ascending=True)
-                        colors = ["#4CAF50" if v > 0 else "#F44336"
-                                  for v in df_mom["ETF거래대금모멘텀(%)"]]
+                        colors_bar = ["#4CAF50" if v > 0 else "#F44336"
+                                      for v in df_mom["ETF거래대금모멘텀(%)"]]
                         fig_etf = go.Figure(go.Bar(
                             x=df_mom["ETF거래대금모멘텀(%)"],
                             y=df_mom["ADR섹터"],
                             orientation="h",
-                            marker_color=colors,
+                            marker_color=colors_bar,
                             text=df_mom["ETF거래대금모멘텀(%)"].apply(lambda v: f"{v:+.1f}%"),
                             textposition="outside",
                         ))
