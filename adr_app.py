@@ -150,6 +150,29 @@ def _ensure_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _expected_last_trading_day() -> str:
+    """캐시가 커버해야 할 마지막 거래일.
+    주말·공휴일·장마감(15:35) 전에는 직전 거래일 — 데이터가 나올 수 없는 날짜를
+    기준으로 삼아 전 종목 재다운로드가 헛돌던 문제 방지."""
+    now = datetime.now()
+    try:
+        import holidays
+        _kr = holidays.SouthKorea()
+    except Exception:
+        _kr = {}
+
+    def _is_td(x):
+        return x.weekday() < 5 and x not in _kr and (x.month, x.day) != (12, 31)
+
+    d = now.date()
+    before_close = now.hour < 15 or (now.hour == 15 and now.minute < 35)
+    if before_close or not _is_td(d):
+        d -= timedelta(days=1)
+    while not _is_td(d):
+        d -= timedelta(days=1)
+    return d.strftime("%Y-%m-%d")
+
+
 def _load_close_prices_inner(market: str, force_refresh: bool = False,
                               progress_bar=None) -> pd.DataFrame:
     """실제 데이터 로드 로직 — st.* 호출 없음 (캐시 함수 안에서 호출 불가)."""
@@ -168,7 +191,7 @@ def _load_close_prices_inner(market: str, force_refresh: bool = False,
 
     if existing is not None and not existing.empty:
         cached_end = existing.index.max().strftime("%Y-%m-%d")
-        if cached_end >= end:
+        if cached_end >= _expected_last_trading_day():
             mask = existing.index >= pd.to_datetime(start)
             return existing.loc[mask]
 
@@ -197,18 +220,18 @@ def _load_close_prices_inner(market: str, force_refresh: bool = False,
     return combined.loc[mask]
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
-def _load_close_prices_cached(market: str, today_key: str) -> pd.DataFrame:
-    """오늘 날짜를 키로 써서 당일 RAM 캐시 유지. st.* 호출 없음."""
+@st.cache_data(show_spinner=False, ttl=43200)
+def _load_close_prices_cached(market: str, trading_day_key: str) -> pd.DataFrame:
+    """거래일을 키로 써서 같은 거래일 내 RAM 캐시 유지 (장마감 후 재방문 시 재조회 방지). st.* 호출 없음."""
     return _load_close_prices_inner(market)
 
 
 def load_close_prices(market: str, force_refresh: bool = False,
                       progress_bar=None) -> pd.DataFrame:
-    """RAM 캐시(당일) → pickle(디스크) → 다운로드 순으로 데이터 반환."""
+    """RAM 캐시(거래일) → pickle(디스크) → 다운로드 순으로 데이터 반환."""
     if force_refresh:
         st.cache_data.clear()
-    return _load_close_prices_cached(market, _today())
+    return _load_close_prices_cached(market, _expected_last_trading_day())
 
 
 @st.cache_data(show_spinner=False)
@@ -562,6 +585,7 @@ def get_sector_map(market: str) -> dict[str, str]:
 
 
 # ── 섹터별 ADR ────────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False, ttl=43200)
 def calc_sector_adr(close: pd.DataFrame, sector_map: dict, period: int) -> pd.DataFrame:
     latest = close.index.max()
     row = close.loc[latest]
@@ -806,6 +830,7 @@ def classify_ab_type(adr: pd.Series, index_s: pd.Series, window: int = 60) -> st
         return "중립"
 
 
+@st.cache_data(show_spinner=False, ttl=43200)
 def calc_concentration_probability(adr: pd.Series, index_s: pd.Series,
                                     horizons: list = [5, 20, 60],
                                     lookback: int = 252) -> dict:
@@ -872,6 +897,7 @@ def calc_concentration_probability(adr: pd.Series, index_s: pd.Series,
     return result
 
 
+@st.cache_data(show_spinner=False, ttl=43200)
 def calc_prob_timeseries(adr: pd.Series, index_s: pd.Series,
                           horizon: int = 20, lookback: int = 252) -> pd.Series:
     """
@@ -920,6 +946,7 @@ def calc_prob_timeseries(adr: pd.Series, index_s: pd.Series,
     return pd.Series(probs, index=dates, name="쏠림심화확률")
 
 
+@st.cache_data(show_spinner=False, ttl=43200)
 def get_top_sector_stocks(close: pd.DataFrame, sector_map: dict,
                            marcap_map: dict, names: dict,
                            period: int = 20, n: int = 5) -> pd.DataFrame:
@@ -1373,6 +1400,7 @@ def screen_stocks(close: pd.DataFrame, period: int, direction: str,
 
 
 # ── 쏠림 완화 반등 잠재력 스코어 ─────────────────────────────────────────────
+@st.cache_data(show_spinner=False, ttl=43200)
 def calc_rebound_score(
     close: pd.DataFrame,
     sector_map: dict,
@@ -1559,9 +1587,9 @@ def add_naver_link(df: pd.DataFrame, code_col: str = "종목코드") -> pd.DataF
     return df
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
+@st.cache_data(show_spinner=False, ttl=43200)
 def _load_etf_cached(today_key: str):
-    """ETF 데이터 로드 — flow_df까지 포함해 반환. 당일 캐시 재사용."""
+    """ETF 데이터 로드 — flow_df까지 포함해 반환. 거래일 캐시 재사용."""
     if not ETF_AVAILABLE:
         return None, pd.DataFrame(), pd.DataFrame()
     _etf_cache_file = os.path.join(ETF_FLOW_DIR, "etf_cache.pkl")
@@ -2269,7 +2297,7 @@ for tab, market in zip(tabs, markets):
                 )
             else:
                 with st.spinner("ETF 데이터 로드 중..."):
-                    etf_raw, etf_meta, flow_df = _load_etf_cached(_today())
+                    etf_raw, etf_meta, flow_df = _load_etf_cached(_expected_last_trading_day())
 
                 if etf_raw is None or etf_raw.empty:
                     st.error("ETF 데이터 로드 실패")
